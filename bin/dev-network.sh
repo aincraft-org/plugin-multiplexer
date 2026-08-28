@@ -239,7 +239,7 @@ lobby_supervisor() {
     fi
   }
 
-  # shellcheck disable=SC2329
+  # shellcheck disable=SC2317,SC2329
   on_shutdown() {
     shutting_down=1
     stop_lobby

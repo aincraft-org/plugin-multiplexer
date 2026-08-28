@@ -39,8 +39,9 @@ if [ -z "$PROXY_PORT" ] && [ -f "$RUNTIME/velocity.toml" ]; then
   PROXY_PORT="$(sed -n 's/^bind = "0.0.0.0:\([0-9][0-9]*\)".*/\1/p' "$RUNTIME/velocity.toml" | sed -n '1p')"
 fi
 PROXY_PORT="${PROXY_PORT:-25565}"
-[[ "$PROXY_PORT" =~ ^[0-9]+$ ]] && [ "$PROXY_PORT" -ge 1024 ] && [ "$PROXY_PORT" -le 65535 ] \
-  || die "invalid proxy port: $PROXY_PORT"
+if ! [[ "$PROXY_PORT" =~ ^[0-9]+$ ]] || [ "$PROXY_PORT" -lt 1024 ] || [ "$PROXY_PORT" -gt 65535 ]; then
+  die "invalid proxy port: $PROXY_PORT"
+fi
 
 registry_file="$RUNTIME/backends.txt"
 [ -f "$registry_file" ] || die "backend registry missing: $registry_file"
@@ -65,8 +66,9 @@ for name in "${registry[@]}"; do
   port_file="$RUNTIME/$name.port"
   [ -f "$port_file" ] || die "missing persisted port for backend '$name': $port_file"
   port="$(tr -d '[:space:]' < "$port_file")"
-  [[ "$port" =~ ^[0-9]+$ ]] && [ "$port" -ge 1024 ] && [ "$port" -le 65535 ] \
-    || die "invalid persisted port for backend '$name': '$port'"
+  if ! [[ "$port" =~ ^[0-9]+$ ]] || [ "$port" -lt 1024 ] || [ "$port" -gt 65535 ]; then
+    die "invalid persisted port for backend '$name': '$port'"
+  fi
   if [ "$port" = "$PROXY_PORT" ] || [ "$port" = "30066" ]; then
     die "backend '$name' collides with reserved port $port"
   fi
