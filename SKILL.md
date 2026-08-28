@@ -457,7 +457,7 @@ backend:30068 (30068)  reachable  motd='dev-network vanilla' version=Paper 26.2
 
 ## Architecture notes
 
-- **Velocity modern forwarding**: `player-info-forwarding-mode = "modern"` in `velocity.toml`, `online-mode=false`, shared secret in `runtime/forwarding.secret` mirrored into every backend's `config/paper-global.yml` → `proxies.velocity.secret`. Offline mode keeps dev accounts (and a Rust Azalea bot from `autonomous-testing`) connectable without Mojang auth.
+- **Velocity modern forwarding**: `player-info-forwarding-mode = "modern"` in `velocity.toml`, with proxy `online-mode=false` by default. Set `PROXY_ONLINE_MODE=true` (or Gradle `-PnetworkOnlineMode=true`) to require Mojang/Microsoft authentication at the proxy; backends remain `online-mode=false` with the shared secret in `runtime/forwarding.secret` mirrored into each backend's `config/paper-global.yml` → `proxies.velocity.secret`. Offline mode keeps dev accounts (and a Rust Azalea bot from `autonomous-testing`) connectable without Mojang auth.
 - **Every backend** sets `server.properties` `online-mode=false` and `spigot.yml` `settings.bungeecord: false` (modern forwarding REQUIRES BungeeCord forwarding off).
 - `forwarding.secret` is generated per boot with a fixed dev secret string — a dev secret, never a production credential.
 - The `try` list for login/kick failover is `["lobby", <backends…>]` — lobby first.

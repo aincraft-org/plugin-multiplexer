@@ -22,10 +22,16 @@ BIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 NETWORK_ROLE="${NETWORK_ROLE:-full}"
 PROXY_PORT="${PROXY_PORT:-25565}"
 TARGET_SERVER="${TARGET_SERVER:-localhost}"
+PROXY_ONLINE_MODE="${PROXY_ONLINE_MODE:-false}"
 
 case "$NETWORK_ROLE" in
   full|proxy) ;;
   *) echo "!! dev-network: invalid NETWORK_ROLE '$NETWORK_ROLE' (use full or proxy)" >&2; exit 1 ;;
+esac
+
+case "$PROXY_ONLINE_MODE" in
+  true|false) ;;
+  *) echo "!! dev-network: invalid PROXY_ONLINE_MODE '$PROXY_ONLINE_MODE' (use true or false)" >&2; exit 1 ;;
 esac
 
 mkdir -p "$BASE/logs" "$BASE/runtime"
@@ -273,7 +279,7 @@ trap teardown INT TERM EXIT
 cd "$BASE"
 spawn lobby_supervisor 7>&-
 spawn env BACKENDS="$REGISTRY" PROXY_PORT="$PROXY_PORT" TARGET_SERVER="$TARGET_SERVER" \
-  DEV_USERS="${DEV_USERS:-dev}" "$BIN_DIR/boot-proxy.sh" 7>&-
+  DEV_USERS="${DEV_USERS:-dev}" PROXY_ONLINE_MODE="$PROXY_ONLINE_MODE" "$BIN_DIR/boot-proxy.sh" 7>&-
 if [ "$NETWORK_ROLE" = "full" ]; then
   for name in $REGISTRY; do
     if printf '%s\n' "${EXTERNAL_BACKENDS:-}" | tr ' ' '\n' | grep -qx "$name"; then

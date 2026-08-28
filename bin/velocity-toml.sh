@@ -18,6 +18,19 @@ write_velocity_toml() {
   local BASE="${BASE:-$PWD/development-network}"
   local PROXY_PORT="${PROXY_PORT:-25565}"
   local TARGET_SERVER="${TARGET_SERVER:-localhost}"
+  local online_mode
+  if [ -n "${PROXY_ONLINE_MODE+x}" ]; then
+    online_mode="$PROXY_ONLINE_MODE"
+  elif [ -f "$BASE/runtime/velocity.toml" ]; then
+    online_mode="$(sed -n 's/^online-mode = \(true\|false\)$/\1/p' "$BASE/runtime/velocity.toml" | sed -n '1p')"
+    online_mode="${online_mode:-false}"
+  else
+    online_mode="false"
+  fi
+  case "$online_mode" in
+    true|false) ;;
+    *) echo "invalid PROXY_ONLINE_MODE '$online_mode' (use true or false)" >&2; return 1 ;;
+  esac
 
   local BACKENDS_SORTED
   if [ -z "${BACKENDS+x}" ]; then
@@ -69,7 +82,7 @@ config-version = "2.8"
 bind = "0.0.0.0:$PROXY_PORT"
 motd = "<#09add3>dev-network"
 show-max-players = 20
-online-mode = false
+online-mode = $online_mode
 force-key-authentication = true
 prevent-client-proxy-connections = false
 player-info-forwarding-mode = "modern"

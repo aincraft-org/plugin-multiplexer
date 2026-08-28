@@ -68,6 +68,14 @@ Start the shared infrastructure once:
 ./gradlew runProxy -PnetworkBase=/shared/network
 ```
 
+For an authenticated proxy (Paper backends remain offline for modern forwarding):
+
+```bash
+./gradlew runProxy \
+  -PnetworkBase=/shared/network \
+  -PnetworkOnlineMode=true
+```
+
 For a backend that this repository manages:
 
 ```bash
