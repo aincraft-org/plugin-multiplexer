@@ -9,13 +9,18 @@ import io.github.developmentnetwork.runtime.state.AtomicFiles
 import io.github.developmentnetwork.runtime.state.BackendStatePaths
 import io.github.developmentnetwork.runtime.state.FileLocks
 import io.github.developmentnetwork.runtime.state.RuntimeLayout
-import java.nio.file.Files
 import java.nio.file.Path
 import java.time.Instant
-
+import java.nio.file.Files
 /** Persistent registry and serialized ownership transitions for one runtime layout. */
 class RegistryStore(private val layout: RuntimeLayout) {
     private val locks = FileLocks(layout)
+
+    private companion object {
+        val PERSISTED_STATE_SUFFIXES = listOf(
+            ".port", ".owner", ".mode", ".pid", ".start", ".executable", ".working-directory",
+        )
+    }
 
     /** Read the validated, sorted, unique backend names from backends.txt. */
     fun readNames(): List<BackendName> = locks.withRegistrationLock {
@@ -42,10 +47,26 @@ class RegistryStore(private val layout: RuntimeLayout) {
     }
 
     fun readRegistrations(): List<BackendRegistration> = locks.withRegistrationLock {
-        readNamesUnlocked().map { name ->
+        persistedNamesUnlocked().map { name ->
             readRegistrationUnlocked(name)
                 ?: error("Registry entry $name has no complete ownership state")
         }
+    }
+
+    /** Include state-file claims even when a crash or manual edit hid their name. */
+    private fun persistedNamesUnlocked(): List<BackendName> {
+        val names = readNamesUnlocked().toMutableSet()
+        if (!Files.isDirectory(layout.runtimeDir)) return names.sortedBy { it.value }
+        Files.list(layout.runtimeDir).use { entries ->
+            entries.forEach { path ->
+                val fileName = path.fileName.toString()
+                PERSISTED_STATE_SUFFIXES.firstOrNull { fileName.endsWith(it) }?.let { suffix ->
+                    val rawName = fileName.removeSuffix(suffix)
+                    if (rawName.isNotEmpty()) names += BackendNames.validate(rawName)
+                }
+            }
+        }
+        return names.sortedBy { it.value }
     }
 
     /** Read one registration, or null when no state exists for the name. */
@@ -121,6 +142,7 @@ class RegistryStore(private val layout: RuntimeLayout) {
     fun register(registration: BackendRegistration) {
         locks.withRegistrationLock {
             val namesBefore = readNamesUnlocked()
+            val persistedNames = persistedNamesUnlocked()
             val existing = readRegistrationUnlocked(registration.name)
             if (registration.name in namesBefore && existing == null) {
                 error("Backend ${registration.name} is already registered without owner metadata")
@@ -129,7 +151,7 @@ class RegistryStore(private val layout: RuntimeLayout) {
                 error("Backend ${registration.name} is already owned by ${existing.owner}")
             }
 
-            namesBefore.map { name ->
+            persistedNames.map { name ->
                 readRegistrationUnlocked(name)
                     ?: error("Registry entry $name has no complete ownership state")
             }.forEach { current ->
@@ -143,9 +165,6 @@ class RegistryStore(private val layout: RuntimeLayout) {
             writeNamesUnlocked(names)
         }
     }
-
-    fun writeRegistration(registration: BackendRegistration) = register(registration)
-
     /** Remove a registration only when its owner token matches. */
     fun unregister(name: BackendName, owner: String): Boolean =
         locks.withRegistrationLock {
@@ -153,7 +172,7 @@ class RegistryStore(private val layout: RuntimeLayout) {
             require(existing.owner == owner) {
                 "Backend $name is owned by ${existing.owner}, not $owner"
             }
-            deleteRegistrationState(layout.backend(name))
+            deleteRegistrationState(layout.backend(name), existing.mode)
             writeNamesUnlocked(readNamesUnlocked().filterNot { it == name })
             true
         }
@@ -197,13 +216,17 @@ class RegistryStore(private val layout: RuntimeLayout) {
         if (value == null) Files.deleteIfExists(path) else AtomicFiles.write(path, "$value\n")
     }
 
-    private fun deleteRegistrationState(state: BackendStatePaths) {
+    private fun deleteRegistrationState(state: BackendStatePaths, mode: OwnershipMode) {
         Files.deleteIfExists(state.port)
         Files.deleteIfExists(state.owner)
         Files.deleteIfExists(state.mode)
-        deleteProcessState(state)
+        // Process identity and auto-directory markers are managed-owned state.
+        if (mode == OwnershipMode.MANAGED) {
+            deleteProcessState(state)
+            Files.deleteIfExists(state.autoDir)
+        }
+        // Readiness is harness metadata for both ownership modes.
         Files.deleteIfExists(state.ready)
-        Files.deleteIfExists(state.autoDir)
     }
 
     private fun deleteProcessState(state: BackendStatePaths) {

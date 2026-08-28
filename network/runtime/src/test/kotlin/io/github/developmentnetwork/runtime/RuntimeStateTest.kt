@@ -4,6 +4,7 @@ import io.github.developmentnetwork.runtime.model.BackendName
 import io.github.developmentnetwork.runtime.state.AtomicFiles
 import io.github.developmentnetwork.runtime.state.FileLocks
 import io.github.developmentnetwork.runtime.state.RuntimeLayout
+import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.Files
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -13,6 +14,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
+import kotlin.test.assertFailsWith
 class RuntimeStateTest {
     @Test
     fun layoutUsesCanonicalRuntimeStatePaths() {
@@ -46,6 +48,38 @@ class RuntimeStateTest {
 
         assertEquals("second", Files.readString(target))
         assertEquals(listOf(target), Files.list(directory).use { it.toList() })
+    }
+
+    @Test
+    fun atomicMoveRejectionFailsSafelyAndCleansTemporaryFile() {
+        val directory = Files.createTempDirectory("atomic-rejection")
+        val target = directory.resolve("state.txt")
+        AtomicFiles.write(target, "original")
+
+        assertFailsWith<AtomicMoveNotSupportedException> {
+            AtomicFiles.write(target, "replacement") { _, _ ->
+                throw AtomicMoveNotSupportedException("source", "target", "test")
+            }
+        }
+
+        assertEquals("original", Files.readString(target))
+        assertEquals(listOf(target), Files.list(directory).use { it.toList() })
+    }
+
+    @Test
+    fun fileLockReleasesWhenProtectedActionThrows() {
+        val base = Files.createTempDirectory("lock-failure")
+        val locks = FileLocks(RuntimeLayout(base))
+
+        assertFailsWith<IllegalStateException> {
+            locks.withProxyLock {
+                error("protected action failed")
+            }
+        }
+
+        var reacquired = false
+        locks.withProxyLock { reacquired = true }
+        assertTrue(reacquired)
     }
 
     @Test

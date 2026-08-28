@@ -3,7 +3,6 @@ package io.github.developmentnetwork.runtime.state
 import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
 import java.nio.charset.StandardCharsets
-import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption.ATOMIC_MOVE
@@ -13,7 +12,12 @@ import java.nio.file.StandardOpenOption.WRITE
 /** Small, same-directory atomic replacement primitive for runtime state. */
 object AtomicFiles {
     fun write(path: Path, content: String) {
-        writeBytes(path, content.toByteArray(StandardCharsets.UTF_8))
+        writeBytes(path, content.toByteArray(StandardCharsets.UTF_8), ::atomicMove)
+    }
+
+    /** Test seam used to exercise failure-safe handling of unsupported atomic moves. */
+    internal fun write(path: Path, content: String, move: (Path, Path) -> Unit) {
+        writeBytes(path, content.toByteArray(StandardCharsets.UTF_8), move)
     }
 
     fun writeLines(path: Path, lines: Iterable<String>) {
@@ -33,7 +37,7 @@ object AtomicFiles {
     fun readLinesIfExists(path: Path): List<String>? =
         if (Files.exists(path)) readLines(path) else null
 
-    private fun writeBytes(path: Path, bytes: ByteArray) {
+    private fun writeBytes(path: Path, bytes: ByteArray, move: (Path, Path) -> Unit) {
         val parent = path.parent ?: Path.of(".")
         Files.createDirectories(parent)
         val fileName = path.fileName?.toString().orEmpty().ifEmpty { "state" }
@@ -46,16 +50,13 @@ object AtomicFiles {
                 }
                 channel.force(true)
             }
-            try {
-                Files.move(temporary, path, ATOMIC_MOVE, REPLACE_EXISTING)
-            } catch (_: AtomicMoveNotSupportedException) {
-                // The temporary file is in the target's directory, so this fallback
-                // remains a single-directory replacement on filesystems without the
-                // optional atomic-move capability.
-                Files.move(temporary, path, REPLACE_EXISTING)
-            }
+            move(temporary, path)
         } finally {
             Files.deleteIfExists(temporary)
         }
+    }
+
+    private fun atomicMove(source: Path, target: Path) {
+        Files.move(source, target, ATOMIC_MOVE, REPLACE_EXISTING)
     }
 }

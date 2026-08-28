@@ -6,6 +6,7 @@ import io.github.developmentnetwork.runtime.model.BackendRegistration
 import io.github.developmentnetwork.runtime.model.OwnershipMode
 import io.github.developmentnetwork.runtime.registry.PortAllocator
 import io.github.developmentnetwork.runtime.registry.RegistryStore
+import io.github.developmentnetwork.runtime.state.AtomicFiles
 import io.github.developmentnetwork.runtime.state.RuntimeLayout
 import java.nio.file.Files
 import kotlin.test.Test
@@ -172,5 +173,53 @@ class RegistryRulesTest {
         assertEquals(OwnershipMode.EXTERNAL, loaded?.mode)
         assertNull(loaded?.process)
         assertTrue(Files.notExists(RuntimeLayout(base).backend(BackendName("external")).pid))
+    }
+
+    @Test
+    fun hiddenPersistedRegistrationStillReservesItsPort() {
+        val base = Files.createTempDirectory("registry-hidden")
+        val layout = RuntimeLayout(base)
+        val store = RegistryStore(layout)
+        val hidden = layout.backend(BackendName("hidden"))
+        Files.createDirectories(layout.runtimeDir)
+        AtomicFiles.write(hidden.port, "30123\n")
+        AtomicFiles.write(hidden.owner, "hidden-owner\n")
+        AtomicFiles.write(hidden.mode, "EXTERNAL\n")
+        store.writeNames(emptyList())
+
+        assertFailsWith<IllegalStateException> {
+            store.register(
+                BackendRegistration(BackendName("new-owner"), 30123, "new-owner", OwnershipMode.MANAGED, null),
+            )
+        }
+    }
+
+    @Test
+    fun externalUnregisterLeavesExternalDirectoryAndManagedOnlyMarkerUntouched() {
+        val base = Files.createTempDirectory("registry-external-cleanup")
+        val layout = RuntimeLayout(base)
+        val store = RegistryStore(layout)
+        val name = BackendName("external")
+        val registration = BackendRegistration(name, 30070, "external-owner", OwnershipMode.EXTERNAL, null)
+        val fixtureDirectory = Files.createTempDirectory("external-server")
+        val fixture = fixtureDirectory.resolve("server.properties")
+        val original = "online-mode=false\nserver-port=30070\n".toByteArray()
+        Files.write(fixture, original)
+
+        store.register(registration)
+        val state = layout.backend(name)
+        AtomicFiles.write(state.ready, "ready\n")
+        AtomicFiles.write(state.autoDir, "${fixtureDirectory}\n")
+
+        assertTrue(store.unregister(name, "external-owner"))
+
+        assertTrue(fixtureDirectory.toFile().exists())
+        assertEquals(original.toList(), Files.readAllBytes(fixture).toList())
+        assertTrue(Files.exists(state.autoDir))
+        assertTrue(Files.notExists(state.port))
+        assertTrue(Files.notExists(state.owner))
+        assertTrue(Files.notExists(state.mode))
+        assertTrue(Files.notExists(state.ready))
+        assertTrue(store.readNames().isEmpty())
     }
 }
