@@ -193,6 +193,32 @@ class RegistryRulesTest {
             )
         }
     }
+    @Test
+    fun liveProxyStateDoesNotBecomeBackendWhileHiddenClaimRemainsDiscoverable() {
+        val base = Files.createTempDirectory("registry-proxy-state")
+        val layout = RuntimeLayout(base)
+        val store = RegistryStore(layout)
+        val hidden = layout.backend(BackendName("hidden"))
+        Files.createDirectories(layout.runtimeDir)
+        AtomicFiles.write(layout.proxyOwner, "proxy-owner\n")
+        AtomicFiles.write(layout.proxyPid, "12345\n")
+        AtomicFiles.write(hidden.port, "30123\n")
+        AtomicFiles.write(hidden.owner, "hidden-owner\n")
+        AtomicFiles.write(hidden.mode, "EXTERNAL\n")
+        store.writeNames(emptyList())
+
+        val discovered = store.readRegistrations()
+        assertEquals(listOf(BackendName("hidden")), discovered.map { it.name })
+
+        store.register(
+            BackendRegistration(BackendName("normal"), 30124, "normal-owner", OwnershipMode.MANAGED, null),
+        )
+        assertEquals(
+            listOf("hidden", "normal"),
+            store.readRegistrations().map { it.name.value },
+        )
+    }
+
 
     @Test
     fun externalUnregisterLeavesExternalDirectoryAndManagedOnlyMarkerUntouched() {

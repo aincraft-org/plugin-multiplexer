@@ -99,3 +99,35 @@ The focused suite executed 16 tests successfully: 11 `RegistryRulesTest` tests a
 - External unregister removes harness registration and readiness metadata but intentionally preserves the external-mode auto-directory marker; process identity and auto-directory cleanup are managed-only.
 - Persisted state discovery treats registration-bearing `.port`, `.owner`, `.mode`, and process identity files as claims; readiness and auto-directory markers alone are ancillary metadata and do not create registrations.
 
+
+## Fix-Round-2 Report
+
+### Files
+
+- Updated `network/runtime/src/test/kotlin/io/github/developmentnetwork/runtime/RegistryRulesTest.kt` with `liveProxyStateDoesNotBecomeBackendWhileHiddenClaimRemainsDiscoverable`, covering live `proxy.owner`/`proxy.pid` state, hidden backend claim discovery, normal registration, and subsequent reads.
+- Updated `network/runtime/src/main/kotlin/io/github/developmentnetwork/runtime/registry/RegistryStore.kt` to explicitly exclude the infrastructure proxy owner and PID files from backend claim discovery while retaining suffix-based discovery for hidden backend state.
+
+### Focused Test Evidence
+
+The required red run after adding the regression test failed as intended:
+
+```text
+./gradlew -p network :runtime:test --tests '*RegistryRulesTest' --tests '*RuntimeStateTest'
+RegistryRulesTest > liveProxyStateDoesNotBecomeBackendWhileHiddenClaimRemainsDiscoverable() FAILED
+17 tests completed, 1 failed
+BUILD FAILED
+```
+
+After the minimal fix:
+
+```text
+./gradlew -p network :runtime:test --tests '*RegistryRulesTest' --tests '*RuntimeStateTest'
+BUILD SUCCESSFUL in 1s
+4 actionable tasks: 3 executed, 1 up-to-date
+```
+
+The focused suite passes, including the new proxy-state/hidden-claim regression.
+
+### Concerns
+
+- No additional concerns. Proxy infrastructure exclusion is limited to the canonical `proxy.owner` and `proxy.pid` paths; hidden backend registration claims continue to be discovered from the persisted state suffixes.

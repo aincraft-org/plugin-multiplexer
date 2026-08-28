@@ -57,9 +57,14 @@ class RegistryStore(private val layout: RuntimeLayout) {
     private fun persistedNamesUnlocked(): List<BackendName> {
         val names = readNamesUnlocked().toMutableSet()
         if (!Files.isDirectory(layout.runtimeDir)) return names.sortedBy { it.value }
+        val infrastructureProxyState = setOf(
+            layout.proxyOwner.fileName.toString(),
+            layout.proxyPid.fileName.toString(),
+        )
         Files.list(layout.runtimeDir).use { entries ->
             entries.forEach { path ->
                 val fileName = path.fileName.toString()
+                if (fileName in infrastructureProxyState) return@forEach
                 PERSISTED_STATE_SUFFIXES.firstOrNull { fileName.endsWith(it) }?.let { suffix ->
                     val rawName = fileName.removeSuffix(suffix)
                     if (rawName.isNotEmpty()) names += BackendNames.validate(rawName)
