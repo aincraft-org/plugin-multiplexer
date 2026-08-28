@@ -80,13 +80,22 @@ Ports are allocated in one shared mapping (the same math `boot-backend.sh`/`boot
 
 So `demo ext` with no overrides → demo `30067`, ext `30068`; if `30068` is taken by an external, a managed auto moves up to the next free port. The proxy, lobby (`30066`), and proxy port (`25565`) are checked up front and fail fast if in use.
 
+## Offline-mode preflight (mandatory)
+
+Complete this preflight before starting any component (`dev-network.sh`, `register-backend.sh`, or `runNetwork`) or connecting a client. “Offline mode” here means Minecraft authentication mode, not merely a local process.
+
+1. **Harness-owned Velocity proxy:** inspect the active/generated `runtime/velocity.toml`. It MUST contain `online-mode = false`. If this workflow owns the proxy and the setting is missing or true, regenerate the config with the harness before startup; do not connect until it is rechecked.
+2. **Existing or external Velocity proxy:** inspect its active configuration, not only this repository. It MUST contain `online-mode = false`. This workflow MUST NOT change an external proxy automatically. If its mode is unknown or true, stop and ask the user before changing it or proceeding.
+3. **Lobby and every backend:** separately verify the lobby’s and each managed backend’s `server.properties`, plus each external backend’s live configuration, contains `online-mode=false`. The proxy setting does not configure Paper servers. Stop and correct the lobby/backend or ask the user before proceeding when any one is unknown or online.
+4. Only after the proxy, lobby, and every backend pass these checks may the network start and a client connect.
+
 ## Start
 
 ```bash
 BACKENDS='demo vanilla' ./development-network/bin/dev-network.sh
 ```
 
-Brings up proxy, lobby, and every registered backend; waits for all ready markers; prints the connection banner. Connect Minecraft to **`localhost:25565`**.
+After the offline-mode preflight passes, this brings up the proxy, lobby, and every registered backend; waits for all ready markers; and prints the connection banner. Connect Minecraft to **`localhost:25565`**.
 
 The controller runs `boot-lobby.sh` under a supervisor loop. If the lobby booter or Paper process exits unexpectedly,
 the supervisor clears stale ready/pid markers, waits two seconds, and starts it again. An intentional controller
@@ -482,6 +491,7 @@ Stops proxy, lobby, and every registered backend by pidfile (Java PID, so Paper'
 | Using port 25565 on a backend | Backends bind 30067+; only the proxy owns 25565 | Only the proxy is reachable by the client |
 | Expecting `/server` to work on a backend directly | `/server` is a Velocity built-in; it only exists on the proxy | Backends have no proxy command routing |
 | Modifying a running server's config and expecting it to apply | Restart that component (or full `stop-dev-network.sh` + boot) | Velocity/Paper read configs at startup only |
+| Starting or connecting before the offline-mode preflight | Verify the active Velocity config and every backend has `online-mode=false`; set an owned proxy to offline mode, or stop and ask before changing or proceeding with an external proxy | Backend offline settings do not prove the active proxy is offline, and an unknown external proxy mode is not permission to proceed |
 | Setting `URL` without `LOBBY_MAP_SHA256` (or vice versa) | Set both, or neither | The world install requires a pinned hash; partial config fails fast at boot with an explicit error |
 | Pointing `URL` at Planet Minecraft / CurseForge / BuiltByBit / MinecraftMaps | Host the zip where plain `curl` works (GitHub release asset, your own HTTP server) | Those hosts 403 plain curl or need browser ad-shortener clicks |
 | Expecting a URL+SHA256 change to replace an installed world | Delete `runtime/lobby/world` first (and the old `.world.zip` cache) | The map install is immutable: an existing `world/level.dat` always wins, never overwritten |
