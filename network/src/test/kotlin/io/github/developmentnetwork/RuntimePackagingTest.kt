@@ -3,6 +3,8 @@ package io.github.developmentnetwork
 import java.io.ByteArrayInputStream
 import java.io.File
 import java.io.IOException
+import java.net.URI
+import java.nio.file.FileSystems
 import java.nio.file.Files
 import java.util.concurrent.Callable
 import java.util.concurrent.Executors
@@ -56,30 +58,61 @@ class RuntimePackagingTest {
     }
 
     @Test
-    fun `serializes concurrent extraction to one verified file`() {
+    fun `serializes overlapping extraction behind a blocked resource stream`() {
         val gradleUserHome = Files.createTempDirectory("runtime-cache-concurrent").toFile()
         val expected = runtimeJarBytes("concurrent")
-        val loader = ResourceClassLoader(expected)
-        val executor = Executors.newFixedThreadPool(8)
+        val loader = BlockingExtractionClassLoader(expected)
+        val executor = Executors.newFixedThreadPool(2)
 
         try {
-            val results = (1..32).map {
-                executor.submit(Callable { RuntimeArtifactLauncher.extract(gradleUserHome, loader) })
-            }.map { it.get() }
-            assertTrue(results.all { it == results.first() })
+            val first = executor.submit(Callable { RuntimeArtifactLauncher.extract(gradleUserHome, loader) })
+            assertTrue(loader.extractionBlocked.await(10, java.util.concurrent.TimeUnit.SECONDS))
+
+            val second = executor.submit(Callable { RuntimeArtifactLauncher.extract(gradleUserHome, loader) })
+            assertTrue(loader.secondDigestStarted.await(10, java.util.concurrent.TimeUnit.SECONDS))
+            loader.releaseExtraction.countDown()
+
+            val results = listOf(first.get(), second.get())
+            assertEquals(results.first(), results.last())
             assertContentEquals(expected, results.first().readBytes())
             JarFile(results.first()).use { jar -> assertNotNull(jar.getEntry("runtime.txt")) }
         } finally {
+            loader.releaseExtraction.countDown()
             executor.shutdownNow()
         }
     }
 
     @Test
+    fun `fails safely when the filesystem cannot atomically install the runtime`() {
+        val archive = Files.createTempFile("runtime-atomic-move", ".zip")
+        Files.delete(archive)
+        val source = Files.createTempFile("runtime-source", ".tmp")
+        Files.writeString(source, "new runtime")
+        val environment = mapOf<String, Any>("create" to true)
+
+        try {
+            FileSystems.newFileSystem(URI.create("jar:${archive.toUri()}"), environment).use { fileSystem ->
+                val target = fileSystem.getPath("/runtime.jar")
+                Files.writeString(target, "old runtime")
+
+                val failure = assertFailsWith<IOException> {
+                    RuntimeArtifactLauncher.moveAtomically(source, target)
+                }
+
+                assertTrue(failure.message.orEmpty().contains("atomically"), failure.message)
+                assertEquals("new runtime", Files.readString(source))
+                assertEquals("old runtime", Files.readString(target))
+            }
+        } finally {
+            Files.deleteIfExists(source)
+        }
+
+    }
+    @Test
     fun `deletes failed temporary extraction output`() {
         val gradleUserHome = Files.createTempDirectory("runtime-cache-failure").toFile()
         val expected = runtimeJarBytes("failure")
         val loader = FailOnSecondStreamClassLoader(expected)
-
         assertFailsWith<IOException> {
             RuntimeArtifactLauncher.extract(gradleUserHome, loader)
         }
@@ -89,6 +122,7 @@ class RuntimePackagingTest {
             .toList()
         assertTrue(temporaryFiles.isEmpty(), "failed extraction left temporary files: $temporaryFiles")
     }
+
 
     @Test
     fun `published plugin jar embeds the exact runtime artifact entry`() {
@@ -155,6 +189,31 @@ class RuntimePackagingTest {
             } else {
                 null
             }
+    }
+
+    private class BlockingExtractionClassLoader(private val payload: ByteArray) : ResourceClassLoader(payload) {
+        val extractionBlocked = java.util.concurrent.CountDownLatch(1)
+        val secondDigestStarted = java.util.concurrent.CountDownLatch(1)
+        val releaseExtraction = java.util.concurrent.CountDownLatch(1)
+        private var streams = 0
+
+        override fun getResourceAsStream(name: String) = synchronized(this) {
+            streams++
+            when (streams) {
+                2 -> object : ByteArrayInputStream(payload) {
+                    override fun read(b: ByteArray, off: Int, len: Int): Int {
+                        extractionBlocked.countDown()
+                        releaseExtraction.await()
+                        return super.read(b, off, len)
+                    }
+                }
+                3 -> {
+                    secondDigestStarted.countDown()
+                    super.getResourceAsStream(name)
+                }
+                else -> super.getResourceAsStream(name)
+            }
+        }
     }
 
     private class FailOnSecondStreamClassLoader(private val payload: ByteArray) : ResourceClassLoader(payload) {

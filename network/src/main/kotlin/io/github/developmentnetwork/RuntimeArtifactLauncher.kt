@@ -161,11 +161,21 @@ object RuntimeArtifactLauncher {
         }
     }
 
-    private fun moveAtomically(source: Path, target: Path) {
+    internal fun moveAtomically(source: Path, target: Path) {
         try {
             Files.move(source, target, ATOMIC_MOVE, REPLACE_EXISTING)
-        } catch (_: AtomicMoveNotSupportedException) {
-            Files.move(source, target, REPLACE_EXISTING)
+        } catch (unsupported: AtomicMoveNotSupportedException) {
+            throw IOException(
+                "Cannot install embedded runtime atomically: filesystem does not support ATOMIC_MOVE " +
+                    "($source -> $target)",
+                unsupported
+            )
+        } catch (unsupported: UnsupportedOperationException) {
+            throw IOException(
+                "Cannot install embedded runtime atomically: filesystem rejected ATOMIC_MOVE " +
+                    "($source -> $target)",
+                unsupported
+            )
         }
     }
 
