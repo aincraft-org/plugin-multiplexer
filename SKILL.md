@@ -344,14 +344,29 @@ To update the submodule pin: `git submodule update --init -- development-network
 DEV_USERS='dev jlo' BACKENDS='demo vanilla' ./development-network/bin/dev-network.sh
 ```
 
-Each backend is OFFLINE mode, so ops use the **name-derived offline UUID** — the exact `java.util.UUID.nameUUIDFromBytes("OfflinePlayer:"+name)` algorithm — computed by `bin/write-ops.sh` (verified byte-for-byte against Java). Log into any backend as `dev` (or your name) and you are opped there.
+Each backend is OFFLINE mode, so ops use the **name-derived offline UUID** — the exact `java.util.UUID.nameUUIDFromBytes("OfflinePlayer:"+name)` algorithm — computed by `bin/write-ops.sh` (verified byte-for-byte against Java). Log in with any username from `DEV_USERS` and you are opped on managed backends.
 
-**The proxy has NO ops.** Velocity is permission-node based, and the harness ships no proxy permission plugin, so proxy commands are governed by Velocity's defaults:
+**Velocity has no OP state.** It uses permission nodes, while Paper backends use `ops.json`. Backend `*`/op does
+not carry to the proxy.
 
-- gated by default: `/velocity plugins|info|reload|dump|heap` → `velocity.command.*`, `/glist` → `velocity.command.glist`, `/send` → `velocity.command.send` — all granted to **nobody** in the harness;
-- open to everyone: `/server <name>` → `velocity.command.server` (default-all).
+When the Proxy Inspector jar is installed on the proxy, every username in `DEV_USERS` receives all proxy
+permissions as a development-only OP equivalent. `runProxy`/`dev-network.sh` passes `DEV_USERS` to the proxy,
+and managed backends receive the same users through `write-ops.sh`. Unlisted players retain Velocity's default
+permissions:
 
-To open proxy admin commands, install a proxy permissions plugin (e.g. LuckPerms on the proxy — note its command is `/lpv` there, and `velocity.command.*` nodes are what matter) or add one via a plugin. Backend `*`/op does not carry to the proxy; the two permission systems are fully separate.
+```bash
+DEV_USERS='your-minecraft-name' ./development-network/bin/dev-network.sh
+```
+
+This wildcard grant is for the local development harness only; do not install this configuration on a shared or
+production proxy.
+
+External Paper servers remain fully external: `registerBackend` never edits their files or grants backend ops.
+Configure `/op your-minecraft-name` (or the external server's permission plugin) there separately.
+
+Without Proxy Inspector, open proxy admin commands with a proxy permissions plugin (for example LuckPerms; its
+proxy command is `/lpv`). The relevant nodes include `velocity.command.*`, `velocity.command.glist`, and
+`velocity.command.send`.
 
 ## Iterating: rebuild → restart ONE backend
 

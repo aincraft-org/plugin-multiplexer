@@ -52,6 +52,11 @@ Commands:
 - `/servers` or `/serverlist` — registered proxy servers, endpoints, ping state, and player counts.
 - `/plugins` or `/pluginlist` — plugins loaded by the Velocity proxy, with IDs and versions.
 
+When the proxy starts with `DEV_USERS='name'`, Proxy Inspector grants those usernames all Velocity permission
+nodes as a development-only OP equivalent. Managed Paper backends receive the same users through `ops.json`.
+External Paper servers are not modified; run `/op name` or configure their permission plugin separately.
+Do not use the wildcard proxy grant on a shared or production proxy.
+
 The plugin does not inspect Paper backend plugin directories. That requires a backend-side reporting plugin and protocol.
 
 ## Shared deployment model

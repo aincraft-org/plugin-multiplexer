@@ -235,7 +235,7 @@ trap teardown INT TERM EXIT
 cd "$BASE"
 spawn "$BIN_DIR/boot-lobby.sh" 7>&-
 spawn env BACKENDS="$REGISTRY" PROXY_PORT="$PROXY_PORT" TARGET_SERVER="$TARGET_SERVER" \
-  "$BIN_DIR/boot-proxy.sh" 7>&-
+  DEV_USERS="${DEV_USERS:-dev}" "$BIN_DIR/boot-proxy.sh" 7>&-
 if [ "$NETWORK_ROLE" = "full" ]; then
   for name in $REGISTRY; do
     if printf '%s\n' "${EXTERNAL_BACKENDS:-}" | tr ' ' '\n' | grep -qx "$name"; then
