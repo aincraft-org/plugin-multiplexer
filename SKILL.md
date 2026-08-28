@@ -88,6 +88,10 @@ BACKENDS='demo vanilla' ./development-network/bin/dev-network.sh
 
 Brings up proxy, lobby, and every registered backend; waits for all ready markers; prints the connection banner. Connect Minecraft to **`localhost:25565`**.
 
+The controller runs `boot-lobby.sh` under a supervisor loop. If the lobby booter or Paper process exits unexpectedly,
+the supervisor clears stale ready/pid markers, waits two seconds, and starts it again. An intentional controller
+shutdown disables the restart loop and stops the current lobby child.
+
 ## Lobby world (optional, first setup only)
 
 The lobby boots with a generated empty world unless you point it at a world zip. On **first setup only** — when `runtime/lobby/world/level.dat` does NOT exist — it downloads, SHA-256-verifies (`LOBBY_MAP_SHA256`), and unpacks the map into `runtime/lobby/world` before Paper starts. **The install is immutable: once a world exists, later boots never download or extract (URL+SHA256 are ignored), so a live world is never overwritten.** An existing generated world is preserved the same way.

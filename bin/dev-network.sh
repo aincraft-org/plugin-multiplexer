@@ -215,6 +215,44 @@ echo "== dev-network: launching components (logs in $BASE/logs) =="
 echo "== backends: ${REGISTRY:-none}"
 echo "== external backends: ${EXTERNAL_BACKENDS:-none}"
 
+lobby_supervisor() {
+  local lobby_pid="" exit_code
+  local shutting_down=0
+
+  stop_lobby() {
+    if [ -n "$lobby_pid" ] && kill -0 "$lobby_pid" 2>/dev/null; then
+      kill "$lobby_pid" 2>/dev/null || true
+      wait "$lobby_pid" 2>/dev/null || true
+    fi
+  }
+
+  # shellcheck disable=SC2329
+  on_shutdown() {
+    shutting_down=1
+    stop_lobby
+  }
+  trap on_shutdown INT TERM
+  trap stop_lobby EXIT
+
+  while [ "$shutting_down" = 0 ]; do
+    rm -f "$BASE/runtime/lobby.ready" "$BASE/runtime/lobby.pid"
+    echo "== lobby supervisor: starting lobby =="
+    "$BIN_DIR/boot-lobby.sh" 7>&- &
+    lobby_pid=$!
+    if wait "$lobby_pid"; then
+      exit_code=0
+    else
+      exit_code=$?
+    fi
+    lobby_pid=""
+    [ "$shutting_down" = 0 ] || break
+    rm -f "$BASE/runtime/lobby.ready" "$BASE/runtime/lobby.pid"
+    echo "!! lobby supervisor: lobby exited with code $exit_code; restarting in 2s" >&2
+    sleep 2
+  done
+  stop_lobby
+}
+
 PIDS=()
 spawn() {
   "$@" &
@@ -233,7 +271,7 @@ teardown() {
 trap teardown INT TERM EXIT
 
 cd "$BASE"
-spawn "$BIN_DIR/boot-lobby.sh" 7>&-
+spawn lobby_supervisor 7>&-
 spawn env BACKENDS="$REGISTRY" PROXY_PORT="$PROXY_PORT" TARGET_SERVER="$TARGET_SERVER" \
   DEV_USERS="${DEV_USERS:-dev}" "$BIN_DIR/boot-proxy.sh" 7>&-
 if [ "$NETWORK_ROLE" = "full" ]; then

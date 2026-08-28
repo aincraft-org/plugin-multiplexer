@@ -7,7 +7,7 @@
 ![Velocity](https://img.shields.io/badge/Velocity-4.1.1-blue)
 ![Paper](https://img.shields.io/badge/Paper-26.2-blue)
 
-A shared local development network for one Velocity proxy, a lobby, and multiple isolated Paper backends. The repository also contains the Proxy Inspector Velocity plugin, which lists registered servers and loaded proxy plugins.
+A shared local development network for one Velocity proxy, a continuously supervised lobby, and multiple isolated Paper backends. The repository also contains the Proxy Inspector Velocity plugin, which lists registered servers and loaded proxy plugins.
 
 ## Components
 
