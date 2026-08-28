@@ -9,11 +9,15 @@ data class BackendName(val value: String) {
         require(NAME_PATTERN.matches(value)) {
             "Invalid backend name '$value'; expected one or more ASCII letters, digits, '_' or '-'."
         }
+        require(value != RESERVED_NAME) {
+            "Backend name '$value' is reserved for infrastructure state; choose a different backend name."
+        }
     }
 
     override fun toString(): String = value
 
     private companion object {
+        const val RESERVED_NAME = "proxy"
         val NAME_PATTERN = Regex("[A-Za-z0-9_-]+")
     }
 }

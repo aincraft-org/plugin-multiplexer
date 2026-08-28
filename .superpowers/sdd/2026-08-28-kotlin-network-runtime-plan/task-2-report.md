@@ -131,3 +131,42 @@ The focused suite passes, including the new proxy-state/hidden-claim regression.
 ### Concerns
 
 - No additional concerns. Proxy infrastructure exclusion is limited to the canonical `proxy.owner` and `proxy.pid` paths; hidden backend registration claims continue to be discovered from the persisted state suffixes.
+
+## Fix-Round-3 Report
+
+### Files
+
+- Updated `network/runtime/src/main/kotlin/io/github/developmentnetwork/runtime/model/NetworkModel.kt` so the shared `BackendName` construction rule reserves the exact lower-case name `proxy` with a clear infrastructure-state error; names such as `proxy2` remain valid.
+- Updated `network/runtime/src/test/kotlin/io/github/developmentnetwork/runtime/RegistryRulesTest.kt` with focused coverage for raw layout, registry, and allocator paths rejecting `proxy`, persisted registry rejection, infrastructure `proxy.owner`/`proxy.pid` readability, and `proxy2` acceptance.
+
+### Focused Test Evidence
+
+The requested selector form was invalid because `:runtime` is not a root task:
+
+```text
+./gradlew -p network :runtime :runtime:test --tests '*RegistryRulesTest' --tests '*RuntimeStateTest'
+Cannot locate tasks that match ':runtime' as task 'runtime' not found in root project 'development-network-plugin'.
+BUILD FAILED
+```
+
+The equivalent focused command was run first after adding the tests and failed as intended:
+
+```text
+./gradlew -p network :runtime:test --tests '*RegistryRulesTest' --tests '*RuntimeStateTest'
+RegistryRulesTest > invalidBackendNamesAreRejected() FAILED
+RegistryRulesTest > proxyNameIsRejectedByRegistryPathsWhileInfrastructureStateRemainsReadable() FAILED
+18 tests completed, 2 failed
+BUILD FAILED
+```
+
+After the shared validation fix:
+
+```text
+./gradlew -p network :runtime:test --tests '*RegistryRulesTest' --tests '*RuntimeStateTest'
+BUILD SUCCESSFUL in 1s
+4 actionable tasks: 4 executed
+```
+
+### Concerns
+
+- No additional concerns. Later Gradle/runtime tasks were not altered; all current Task 2 backend-derived paths continue to receive validated `BackendName` values.

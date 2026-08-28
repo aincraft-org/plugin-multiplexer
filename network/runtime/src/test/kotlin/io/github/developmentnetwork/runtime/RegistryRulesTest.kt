@@ -18,11 +18,56 @@ import kotlin.test.assertTrue
 class RegistryRulesTest {
     @Test
     fun invalidBackendNamesAreRejected() {
-        listOf("", "has space", "slash/name", "ümlaut", "a.b", "a/b").forEach { raw ->
+        listOf("", "has space", "slash/name", "ümlaut", "a.b", "a/b", "proxy").forEach { raw ->
             assertFailsWith<IllegalArgumentException> { BackendNames.validate(raw) }
             assertFailsWith<IllegalArgumentException> { BackendName(raw) }
         }
         assertEquals("plugin_1-2", BackendNames.validate("plugin_1-2").value)
+        assertEquals("proxy2", BackendNames.validate("proxy2").value)
+    }
+
+    @Test
+    fun proxyNameIsRejectedByRegistryPathsWhileInfrastructureStateRemainsReadable() {
+        val base = Files.createTempDirectory("registry-proxy-reserved")
+        val layout = RuntimeLayout(base)
+        val store = RegistryStore(layout)
+
+        fun assertProxyRejected(action: () -> Unit) {
+            val error = assertFailsWith<IllegalArgumentException>(block = action)
+            assertTrue(error.message.orEmpty().contains("reserved"))
+        }
+
+        assertProxyRejected { layout.backend("proxy") }
+        assertProxyRejected { layout.backendPaths("proxy") }
+        assertProxyRejected { layout.backendState("proxy") }
+        assertProxyRejected { layout.backendPort("proxy") }
+        assertProxyRejected { layout.backendOwner("proxy") }
+        assertProxyRejected { layout.backendMode("proxy") }
+        assertProxyRejected { layout.backendPid("proxy") }
+        assertProxyRejected { layout.backendReady("proxy") }
+        assertProxyRejected { layout.backendAutoDir("proxy") }
+        assertProxyRejected { store.readRegistration("proxy") }
+        assertProxyRejected { store.unregister("proxy", "owner") }
+        assertProxyRejected { store.writeNames(listOf(BackendName("proxy"))) }
+        assertProxyRejected {
+            store.register(
+                BackendRegistration(BackendName("proxy"), 30123, "owner", OwnershipMode.MANAGED, null),
+            )
+        }
+        assertProxyRejected {
+            PortAllocator().allocate("proxy", listOf("proxy"))
+        }
+
+        Files.createDirectories(layout.runtimeDir)
+        AtomicFiles.write(layout.proxyOwner, "proxy-owner\n")
+        AtomicFiles.write(layout.proxyPid, "12345\n")
+        assertEquals("proxy-owner\n", Files.readString(layout.proxyOwner))
+        assertEquals("12345\n", Files.readString(layout.proxyPid))
+        assertTrue(store.readRegistrations().isEmpty())
+
+        AtomicFiles.write(layout.registryFile, "proxy\n")
+        assertProxyRejected { store.readNames() }
+        assertProxyRejected { store.readRegistrations() }
     }
 
     @Test
