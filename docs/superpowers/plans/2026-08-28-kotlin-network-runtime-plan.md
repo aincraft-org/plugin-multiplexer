@@ -326,6 +326,7 @@
 - Modify: `.github/workflows/nightly.yml`
 - Modify: `.github/workflows/release.yml` only where shell quality commands or script packaging are referenced
 - Modify: `AGENTS.md` if it is tracked in the implementation branch
+- Create: `network/src/test/kotlin/io/github/developmentnetwork/DocumentationContractTest.kt`
 - Test: documentation/reference search and CI YAML parse checks
 
 **Interfaces:**
