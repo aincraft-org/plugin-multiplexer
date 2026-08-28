@@ -1,6 +1,7 @@
 import java.time.LocalDate
 import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
+import org.gradle.jvm.tasks.Jar
 
 plugins {
     `java-gradle-plugin`
@@ -38,4 +39,36 @@ gradlePlugin {
 
 repositories {
     mavenCentral()
+}
+
+dependencies {
+    testImplementation(kotlin("test"))
+    testImplementation(kotlin("test-junit5"))
+    testImplementation("org.junit.jupiter:junit-jupiter:5.13.4")
+    testRuntimeOnly("org.junit.platform:junit-platform-launcher")
+    testImplementation(gradleTestKit())
+}
+
+evaluationDependsOn(":runtime")
+val runtimeProject = project(":runtime")
+val runtimeJar = runtimeProject.tasks.named<Jar>("jar")
+
+tasks.named<Jar>("jar") {
+    dependsOn(runtimeJar)
+    from(runtimeJar) {
+        into("META-INF/development-network")
+        rename { "runtime.jar" }
+    }
+}
+
+tasks.named("check") {
+    dependsOn(runtimeProject.tasks.named("check"))
+}
+
+tasks.named("assemble") {
+    dependsOn(runtimeJar)
+}
+
+tasks.test {
+    useJUnitPlatform()
 }
