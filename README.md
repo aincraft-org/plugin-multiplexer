@@ -49,7 +49,7 @@ cp velocity-plugin/build/libs/proxy-inspector-*.jar /path/to/velocity/plugins/
 
 Commands:
 
-- `/servers` or `/serverlist` — registered proxy servers, endpoints, ping state, and player counts.
+- `/servers` or `/serverlist` — asynchronously pings every registered server, then reports online/offline counts, names in each group, endpoints, and player counts.
 - `/plugins` or `/pluginlist` — plugins loaded by the Velocity proxy, with IDs and versions.
 
 When the proxy starts with `DEV_USERS='name'`, Proxy Inspector grants those usernames the explicit Velocity

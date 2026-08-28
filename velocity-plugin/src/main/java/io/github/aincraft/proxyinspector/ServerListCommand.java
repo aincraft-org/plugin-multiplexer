@@ -1,5 +1,6 @@
 package io.github.aincraft.proxyinspector;
 
+import com.velocitypowered.api.command.CommandSource;
 import com.velocitypowered.api.command.SimpleCommand;
 import com.velocitypowered.api.proxy.ProxyServer;
 import com.velocitypowered.api.proxy.server.RegisteredServer;
@@ -8,6 +9,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.stream.Collectors;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
 
@@ -34,9 +36,8 @@ final class ServerListCommand implements SimpleCommand {
             return;
         }
 
-        invocation.source().sendMessage(
-                Component.text("Registered servers (" + servers.size() + "):", NamedTextColor.AQUA)
-        );
+        CommandSource source = invocation.source();
+        source.sendMessage(Component.text("Checking registered servers...", NamedTextColor.GRAY));
 
         List<CompletableFuture<ServerStatus>> statuses = new ArrayList<>(servers.size());
         for (RegisteredServer server : servers) {
@@ -45,9 +46,35 @@ final class ServerListCommand implements SimpleCommand {
 
         CompletableFuture<?>[] statusFutures = statuses.toArray(CompletableFuture<?>[]::new);
         CompletableFuture.allOf(statusFutures).thenRun(() -> {
-            for (CompletableFuture<ServerStatus> status : statuses) {
-                invocation.source().sendMessage(status.join().asComponent());
+            List<ServerStatus> resolved = statuses.stream()
+                    .map(CompletableFuture::join)
+                    .toList();
+            long onlineCount = resolved.stream().filter(ServerStatus::online).count();
+            long offlineCount = resolved.size() - onlineCount;
+
+            source.sendMessage(Component.text(
+                    "Servers: " + onlineCount + " online, " + offlineCount + " offline (" + resolved.size() + " total)",
+                    NamedTextColor.AQUA
+            ));
+            if (onlineCount > 0) {
+                source.sendMessage(Component.text(
+                        "Online: " + resolved.stream()
+                                .filter(ServerStatus::online)
+                                .map(ServerStatus::name)
+                                .collect(Collectors.joining(", ")),
+                        NamedTextColor.GREEN
+                ));
             }
+            if (offlineCount > 0) {
+                source.sendMessage(Component.text(
+                        "Offline: " + resolved.stream()
+                                .filter(status -> !status.online())
+                                .map(ServerStatus::name)
+                                .collect(Collectors.joining(", ")),
+                        NamedTextColor.RED
+                ));
+            }
+            resolved.forEach(status -> source.sendMessage(status.asComponent()));
         });
     }
 

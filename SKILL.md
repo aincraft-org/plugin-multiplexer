@@ -139,13 +139,13 @@ BASE=/path/to/development-network
 cd velocity-plugin
 gradle build
 mkdir -p "$BASE/runtime/plugins"
-cp build/libs/proxy-inspector-0.1.0.jar "$BASE/runtime/plugins/"
+cp build/libs/proxy-inspector-*.jar "$BASE/runtime/plugins/"
 ```
 
 It registers:
 
-- `/servers` (alias `/serverlist`) — lists every server registered in the proxy, its endpoint, online/offline
-  ping status, and connected-player count.
+- `/servers` (alias `/serverlist`) — asynchronously pings every registered server, then reports online/offline
+  counts, the names in each group, endpoints, and connected-player count.
 - `/plugins` (alias `/pluginlist`) — lists the plugins loaded by the Velocity proxy, including their IDs and
   versions.
 
