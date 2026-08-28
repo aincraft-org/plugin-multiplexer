@@ -71,9 +71,8 @@ abstract class RunProxyTask : DefaultTask() {
                 "BASE" to project.layout.projectDirectory.dir(base).asFile.absolutePath,
                 "NETWORK_ROLE" to "proxy",
                 "PROXY_PORT" to proxyPort.toString(),
-                "DEV_USERS" to devUsers(project),
-                "PROXY_ONLINE_MODE" to proxyOnlineMode(project).toString()
-            ),
+                "DEV_USERS" to devUsers(project)
+            ) + proxyOnlineModeEnvironment(project),
             removeInherited = setOf("BACKENDS", "EXTERNAL_BACKENDS")
         )
         val exit = waitFor(process, "proxy controller")
@@ -267,9 +266,8 @@ abstract class RunNetworkTask : DefaultTask() {
                 "BACKENDS" to name,
                 "PROXY_PORT" to proxyPort.toString(),
                 "DEV_USERS" to users,
-                "PROXY_ONLINE_MODE" to proxyOnlineMode(project).toString(),
                 "NETWORK_ROLE" to "full"
-            )
+            ) + proxyOnlineModeEnvironment(project)
         )
         val exit = waitFor(process, "full network")
         if (exit != 0 && exit != 130) {
@@ -286,12 +284,12 @@ private fun devUsers(project: Project): String =
         ?: System.getenv("DEV_NETWORK_DEV_USERS")
         ?: "dev"
 
-private fun proxyOnlineMode(project: Project): Boolean {
-    val value = property(project, "networkOnlineMode") ?: "false"
+private fun proxyOnlineModeEnvironment(project: Project): Map<String, String> {
+    val value = property(project, "networkOnlineMode") ?: return emptyMap()
     check(value == "true" || value == "false") {
         "networkOnlineMode '$value' invalid (use true or false)"
     }
-    return value == "true"
+    return mapOf("PROXY_ONLINE_MODE" to value)
 }
 
 private fun harnessBin(project: Project): File {

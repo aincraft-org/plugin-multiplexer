@@ -22,7 +22,14 @@ BIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 NETWORK_ROLE="${NETWORK_ROLE:-full}"
 PROXY_PORT="${PROXY_PORT:-25565}"
 TARGET_SERVER="${TARGET_SERVER:-localhost}"
-PROXY_ONLINE_MODE="${PROXY_ONLINE_MODE:-false}"
+if [ -z "${PROXY_ONLINE_MODE+x}" ]; then
+  if [ -f "$BASE/runtime/velocity.toml" ]; then
+    PROXY_ONLINE_MODE="$(sed -n 's/^online-mode = \(true\|false\)$/\1/p' "$BASE/runtime/velocity.toml" | sed -n '1p')"
+    PROXY_ONLINE_MODE="${PROXY_ONLINE_MODE:-false}"
+  else
+    PROXY_ONLINE_MODE="false"
+  fi
+fi
 
 case "$NETWORK_ROLE" in
   full|proxy) ;;
