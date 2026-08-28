@@ -349,17 +349,19 @@ Each backend is OFFLINE mode, so ops use the **name-derived offline UUID** — t
 **Velocity has no OP state.** It uses permission nodes, while Paper backends use `ops.json`. Backend `*`/op does
 not carry to the proxy.
 
-When the Proxy Inspector jar is installed on the proxy, every username in `DEV_USERS` receives all proxy
-permissions as a development-only OP equivalent. `runProxy`/`dev-network.sh` passes `DEV_USERS` to the proxy,
-and managed backends receive the same users through `write-ops.sh`. Unlisted players retain Velocity's default
-permissions:
+When the Proxy Inspector jar is installed on the proxy, every username in `DEV_USERS` receives these explicit
+Velocity nodes: `velocity.command.*`, `velocity.command.info`, `velocity.command.plugins`,
+`velocity.command.reload`, `velocity.command.dump`, `velocity.command.heap`, `velocity.command.glist`, and
+`velocity.command.send`. `velocity.command.*` is included because Velocity's built-in admin command uses that
+node; unlisted players retain Velocity's default permissions. `runProxy`/`dev-network.sh` passes `DEV_USERS` to
+the proxy, and managed backends receive the same users through `write-ops.sh`:
 
 ```bash
 DEV_USERS='your-minecraft-name' ./development-network/bin/dev-network.sh
 ```
 
-This wildcard grant is for the local development harness only; do not install this configuration on a shared or
-production proxy.
+This development-only grant must not be installed on a shared or production proxy; use a real proxy permissions
+plugin there instead.
 
 External Paper servers remain fully external: `registerBackend` never edits their files or grants backend ops.
 Configure `/op your-minecraft-name` (or the external server's permission plugin) there separately.

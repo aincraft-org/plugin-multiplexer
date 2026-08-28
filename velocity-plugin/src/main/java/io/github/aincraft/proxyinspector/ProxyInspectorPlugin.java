@@ -14,6 +14,16 @@ import java.util.stream.Collectors;
 import org.slf4j.Logger;
 
 public final class ProxyInspectorPlugin {
+    private static final Set<String> PROXY_ADMIN_PERMISSIONS = Set.of(
+            "velocity.command.*",
+            "velocity.command.info",
+            "velocity.command.plugins",
+            "velocity.command.reload",
+            "velocity.command.dump",
+            "velocity.command.heap",
+            "velocity.command.glist",
+            "velocity.command.send"
+    );
     private final ProxyServer proxy;
     private final Logger logger;
     private final Set<String> adminUsers;
@@ -28,7 +38,10 @@ public final class ProxyInspectorPlugin {
     @Subscribe
     public void onPermissionsSetup(PermissionsSetupEvent event) {
         if (event.getSubject() instanceof Player player && adminUsers.contains(player.getUsername())) {
-            event.setProvider(subject -> permission -> Tristate.TRUE);
+            event.setProvider(subject -> permission ->
+                    PROXY_ADMIN_PERMISSIONS.contains(permission)
+                            ? Tristate.TRUE
+                            : Tristate.UNDEFINED);
         }
     }
 
