@@ -1,0 +1,4 @@
+# Gradle plugin module build artifacts (never commit)
+/.gradle/
+/build/
+/.kotlin/

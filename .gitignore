@@ -1,0 +1,9 @@
+# Runtime / generated artifacts
+runtime/
+binaries/
+logs/
+
+# Gradle build caches (network/ also has its own)
+.gradle/
+build/
+.kotlin/
