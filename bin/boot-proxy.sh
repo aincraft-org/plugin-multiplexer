@@ -32,22 +32,30 @@ mkdir -p "$BASE/binaries" "$BASE/runtime"
 # runtime-registration machinery (register-backend.sh reservation scan,
 # velocity-toml.sh generator) honors the LIVE ports of boot-time servers —
 # index math shifts when a new name sorts before them.
-for n in $(printf '%s\n' $BACKENDS | sort -u); do
-  KEY="PORT_${n^^}"
-  if [ -n "${!KEY:-}" ]; then
-    printf '%s\n' "${!KEY}" > "$BASE/runtime/$n.port"
+port_override() {
+  local n="$1" key
+  if [[ "$n" =~ ^[A-Za-z0-9_]+$ ]]; then
+    key="PORT_${n^^}"
+    printf '%s' "${!key:-}"
+  fi
+}
+for n in $(printf '%s\n' "$BACKENDS" | tr ' ' '\n' | sort -u); do
+  [ -f "$BASE/runtime/$n.port" ] && continue
+  OVERRIDE="$(port_override "$n")"
+  if [ -n "$OVERRIDE" ]; then
+    P="$OVERRIDE"
   else
     IDX=0
     P=30067
-    for x in $(printf '%s\n' $BACKENDS | sort -u); do
+    for x in $(printf '%s\n' "$BACKENDS" | tr ' ' '\n' | sort -u); do
       if [ "$x" = "$n" ]; then
         P=$((30067 + IDX))
         break
       fi
       IDX=$((IDX + 1))
     done
-    printf '%s\n' "$P" > "$BASE/runtime/$n.port"
   fi
+  printf '%s\n' "$P" > "$BASE/runtime/$n.port"
 done
 
 JAR="$BASE/binaries/velocity-$VERSION-$BUILD.jar"
@@ -80,7 +88,7 @@ PROXY_PID=$!
 echo "$PROXY_PID" > "$BASE/runtime/proxy.pid"
 trap 'kill "$PROXY_PID" 2>/dev/null || true; exec 9>&- 2>/dev/null || true; rm -f "$CMDFIFO"' EXIT
 
-for i in $(seq 1 120); do
+for _ in $(seq 1 120); do
   if (exec 3<>"/dev/tcp/127.0.0.1/$PROXY_PORT") 2>/dev/null; then
     exec 3>&- 3<&-
     touch "$BASE/runtime/proxy.ready"

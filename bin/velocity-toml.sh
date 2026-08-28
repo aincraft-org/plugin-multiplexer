@@ -20,28 +20,32 @@ write_velocity_toml() {
   local TARGET_SERVER="${TARGET_SERVER:-localhost}"
 
   local BACKENDS_SORTED
-  if [ -f "$BASE/runtime/backends.txt" ] && [ -z "${BACKENDS+x}" ]; then
-    BACKENDS="$(cat "$BASE/runtime/backends.txt")"
+  if [ -z "${BACKENDS+x}" ]; then
+    if [ -f "$BASE/runtime/backends.txt" ]; then
+      BACKENDS="$(cat "$BASE/runtime/backends.txt")"
+    else
+      BACKENDS="dev"
+    fi
   fi
-  BACKENDS="${BACKENDS:-dev}"
-  BACKENDS_SORTED="$(printf '%s\n' $BACKENDS | sort -u | tr '\n' ' ')"
+  BACKENDS_SORTED="$(printf '%s\n' "$BACKENDS" | tr ' ' '\n' | sort -u | tr '\n' ' ')"
 
   # Runtime-registered EXTERNAL servers persist their live port in
   # runtime/<name>.port (bin/register-backend.sh). Honor it on every regen so
-  # a live server's port never changes across a reload or a proxy reboot —
-  # index math only applies to names without a persisted port.
-  for n in $BACKENDS_SORTED; do
-    if [ -f "$BASE/runtime/$n.port" ]; then
-      export "PORT_${n^^}=$(cat "$BASE/runtime/$n.port")"
-    fi
-  done
-
+  # a live server's port never changes across a reload or a proxy reboot.
   backend_port() {
     local n="$1" key idx=0 x
-    key="PORT_${n^^}"
-    if [ -n "${!key:-}" ]; then
-      echo "${!key}"
+    if [ -f "$BASE/runtime/$n.port" ]; then
+      cat "$BASE/runtime/$n.port"
       return
+    fi
+    # Shell variable names cannot contain '-', so only inspect PORT_<NAME>
+    # directly for names that can be represented as environment variables.
+    if [[ "$n" =~ ^[A-Za-z0-9_]+$ ]]; then
+      key="PORT_${n^^}"
+      if [ -n "${!key:-}" ]; then
+        echo "${!key}"
+        return
+      fi
     fi
     for x in $BACKENDS_SORTED; do
       if [ "$x" = "$n" ]; then

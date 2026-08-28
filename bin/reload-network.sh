@@ -33,10 +33,12 @@ fi
 
 (
   export BASE PROXY_PORT
+  # shellcheck source=velocity-toml.sh
   . "$BIN_DIR/velocity-toml.sh"
   write_velocity_toml
 )
 
+# shellcheck disable=SC2031
 if [ -p "$BASE/runtime/velocity.cmd" ]; then
   printf 'velocity reload\n' > "$BASE/runtime/velocity.cmd"
   echo "   reload: velocity reload sent; registry applied"

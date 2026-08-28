@@ -35,18 +35,34 @@ JAR="$BASE/binaries/paper-$VERSION-$BUILD.jar"
 
 # --- port from the sorted registry (same math as boot-proxy.sh) -------------
 REGISTRY="${BACKENDS:-$(cat "$BASE/runtime/backends.txt" 2>/dev/null || echo dev)}"
-PORT_KEY="PORT_${NAME^^}"
-if [ -n "${!PORT_KEY:-}" ]; then
-  SERVER_PORT="${!PORT_KEY}"
-elif [ -f "$BASE/runtime/$NAME.port" ]; then
-  # Runtime-registered backend (register-backend.sh): its live port is
-  # persisted so a reboot/re-boot keeps it — index math may have reindexed
-  # away from it after later registrations.
+if [ -f "$BASE/runtime/$NAME.port" ]; then
+  # Runtime registration persists the live port; it is authoritative even
+  # when a later registry reindex would choose a different default.
   SERVER_PORT="$(cat "$BASE/runtime/$NAME.port")"
+elif [[ "$NAME" =~ ^[A-Za-z0-9_]+$ ]]; then
+  PORT_KEY="PORT_${NAME^^}"
+  if [ -n "${!PORT_KEY:-}" ]; then
+    SERVER_PORT="${!PORT_KEY}"
+  else
+    IDX=0
+    SERVER_PORT=30067
+    for x in $(printf '%s\n' "$REGISTRY" | tr ' ' '\n' | sort -u); do
+      if [ "$x" = "$NAME" ]; then
+        break
+      fi
+      IDX=$((IDX + 1))
+    done
+    SERVER_PORT=$((30067 + IDX))
+    while (exec 3<>"/dev/tcp/127.0.0.1/$SERVER_PORT") 2>/dev/null; do
+      exec 3>&- 3<&-
+      SERVER_PORT=$((SERVER_PORT + 1))
+    done
+    exec 3>&- 3<&- 2>/dev/null || true
+  fi
 else
   IDX=0
   SERVER_PORT=30067
-  for x in $(printf '%s\n' $REGISTRY | sort -u); do
+  for x in $(printf '%s\n' "$REGISTRY" | tr ' ' '\n' | sort -u); do
     if [ "$x" = "$NAME" ]; then
       break
     fi
@@ -71,9 +87,14 @@ if [ "$WORKDIR" != "$BASE/runtime/$NAME" ]; then
   echo "$WORKDIR" > "$BASE/runtime/$NAME.auto-dir"
 fi
 
-# Plugin install: $PLUGIN_<NAME> wins, then $PLUGIN_JAR.
-PLUGIN_KEY="PLUGIN_${NAME^^}"
-PLUGIN_PATH="${!PLUGIN_KEY:-${PLUGIN_JAR:-}}"
+# Plugin install: $PLUGIN_<NAME> wins, then $PLUGIN_JAR. Names containing '-'
+# cannot address a shell variable; their auto backend directory is already
+# populated by the caller.
+PLUGIN_PATH="${PLUGIN_JAR:-}"
+if [[ "$NAME" =~ ^[A-Za-z0-9_]+$ ]]; then
+  PLUGIN_KEY="PLUGIN_${NAME^^}"
+  PLUGIN_PATH="${!PLUGIN_KEY:-${PLUGIN_JAR:-}}"
+fi
 # CalVer names change every build: stale jars must go, or old versions stay loaded.
 if [ -n "$PLUGIN_PATH" ]; then
   rm -f "$WORKDIR/plugins/"*.jar
@@ -120,7 +141,7 @@ SERVER_PID=$!
 echo "$SERVER_PID" > "$BASE/runtime/$NAME.pid"
 trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
 
-for i in $(seq 1 240); do
+for _ in $(seq 1 240); do
   if (exec 3<>"/dev/tcp/127.0.0.1/$SERVER_PORT") 2>/dev/null; then
     exec 3>&- 3<&-
     touch "$BASE/runtime/$NAME.ready"

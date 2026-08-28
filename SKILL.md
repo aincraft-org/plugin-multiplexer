@@ -27,6 +27,9 @@ development-network/
 ├── network/                    # Gradle plugin (io.github.development-network) — runNetwork task
 │   ├── build.gradle.kts        #   java-gradle-plugin + Kotlin 2.4.0 (matches Gradle 9.7.1)
 │   └── src/main/kotlin/…       #   DevNetworkPlugin + RunNetworkTask
+├── velocity-plugin/            # Velocity proxy plugin — /servers and /plugins
+│   ├── build.gradle.kts        #   Java 25 + velocity-api 4.1.1
+│   └── src/main/java/…         #   ProxyInspectorPlugin and commands
 └── bin/
     ├── dev-network.sh          # boot proxy + lobby + all registered backends
     ├── stop-dev-network.sh     # graceful per-pidfile stop of proxy, lobby, backends
@@ -69,9 +72,11 @@ Ports: proxy `25565`, lobby `30066`, backends `30067 + index` in the sorted name
 Ports are allocated in one shared mapping (the same math `boot-backend.sh`/`boot-external.sh` use, so they always agree with the proxy):
 
 1. **Default**: `30067 + sorted-registry-index` — each backend's position in the sorted name list.
-2. **Explicit override wins**: `PORT_<NAME>` (e.g. `PORT_DEMO=31001`) beats the default.
-3. **Externals reserve their port** (explicit or default) and are **never reassigned** — a live server's port is fixed.
-4. **Managed autos skip** anything occupied **or already reserved** (external or explicit), scanning upward from their default.
+2. **Persisted live port wins**: `runtime/<name>.port` keeps a registered backend on its live port across
+   reindexes and proxy reloads.
+3. **Explicit override next**: `PORT_<NAME>` (e.g. `PORT_DEMO=31001`) is used when no persisted port exists.
+4. **Managed autos skip** anything occupied **or already reserved** (external or explicit), scanning upward from
+   their default.
 
 So `demo ext` with no overrides → demo `30067`, ext `30068`; if `30068` is taken by an external, a managed auto moves up to the next free port. The proxy, lobby (`30066`), and proxy port (`25565`) are checked up front and fail fast if in use.
 
@@ -111,44 +116,144 @@ PLUGIN_VANILLA=/path/to/other/plugin.jar \
 BACKENDS='demo vanilla' ./development-network/bin/dev-network.sh
 ```
 
+## Proxy Inspector plugin
+
+`velocity-plugin/` is a standalone Velocity 4.1.1 proxy plugin. Build it with Gradle 9.7.1, then copy the
+resulting jar into the proxy's `runtime/plugins/` directory before starting the proxy:
+
+```bash
+BASE=/path/to/development-network
+cd velocity-plugin
+gradle build
+mkdir -p "$BASE/runtime/plugins"
+cp build/libs/proxy-inspector-0.1.0.jar "$BASE/runtime/plugins/"
+```
+
+It registers:
+
+- `/servers` (alias `/serverlist`) — lists every server registered in the proxy, its endpoint, online/offline
+  ping status, and connected-player count.
+- `/plugins` (alias `/pluginlist`) — lists the plugins loaded by the Velocity proxy, including their IDs and
+  versions.
+
+The plugin leaves Velocity's built-in `/server <name>` command untouched. These commands inspect the proxy only:
+Velocity cannot discover the plugin list of a Paper backend without a separate backend plugin and reporting
+protocol. Restart the proxy after installing or updating the jar.
+
 ## Runtime registration (hot-add backends, no proxy restart)
 
 A backend can join an **already-running** network — this is the entry point for another agent/process hooking in after the first boot. The proxy keeps running; nothing is restarted.
 
 ```bash
-# boot a NEW managed server at runtime/hero/ and route to it live
-./development-network/bin/register-backend.sh hero
+# boot a NEW managed server at runtime/hero/ and route it live
+REGISTRATION_OWNER=agent-hero \
+  ./development-network/bin/register-backend.sh hero "" /path/to/hero/server
 
 # join an ALREADY-RUNNING server (external semantics: never started/stopped)
-./development-network/bin/register-backend.sh hero 30070
+REGISTRATION_OWNER=agent-hero \
+  ./development-network/bin/register-backend.sh hero 30070
 ```
 
-What it does: picks a free port (scanning up from 30067, or exact/`PORT_<NAME>` port), appends the name to `runtime/backends.txt`, optionally boots the server dir (waits for ready) or marks an external one ready, regenerates `velocity.toml` with the **same generator the proxy used at boot** (`bin/velocity-toml.sh` — identical config, so a reload is a no-op diff), then sends `velocity reload` through the proxy's command FIFO (`runtime/velocity.cmd`). Velocity re-reads the config live: `[servers]`+`try` gain the new entry and `/server <name>` routes to it — proven by `Velocity configuration successfully reloaded.` in the proxy log. The running proxy's bound port is read back from its `velocity.toml` so a non-default `PROXY_PORT` is preserved.
+`REGISTRATION_OWNER` is persisted in `runtime/hero.owner`; use the same token for
+unregistration. The managed form boots the supplied `SERVER_DIR`; the external form only verifies the live
+server and never starts or stops it.
+
+What it does: picks a free port (scanning up from 30067, or exact/`PORT_<NAME>` port), atomically claims the
+unique name and port, appends the name to `runtime/backends.txt`, optionally boots the server dir (waits for
+ready) or marks an external one ready, regenerates `velocity.toml` with the **same generator the proxy used at
+boot** (`bin/velocity-toml.sh` — identical config, so a reload is a no-op diff), then sends `velocity reload`
+through the proxy's command FIFO (`runtime/velocity.cmd`). Velocity re-reads the config live: `[servers]`+`try`
+gain the new entry and `/server <name>` routes to it — proven by `Velocity configuration successfully reloaded.`
+in the proxy log. The running proxy's bound port is read back from its `velocity.toml` so a non-default
+`PROXY_PORT` is preserved.
+
+### Ownership contract
+
+A `BASE` directory is one network coordination domain. It has exactly one infrastructure owner and zero or more
+backend owners:
+
+- `runProxy` (or the shell `dev-network.sh` controller) is the only task/process allowed to start or stop the
+  proxy and lobby. It owns the proxy runtime state.
+- `registerBackend` owns exactly one external backend registration. It never starts or stops Paper, the proxy, or
+  the lobby.
+- `runBackend` owns exactly one managed backend registration and its Paper process. It never starts, restarts, or
+  stops the proxy or lobby.
+- `runtime/register.lock` serializes registry, port, ownership metadata, config regeneration, and reload.
+  Duplicate backend names fail instead of replacing another owner's registration.
+- `unregister-backend.sh` may remove only the registration owned by the caller; an explicit force operation is
+  reserved for the network owner.
+
+### Component ownership matrix
+
+| Component | Starts/stops | Registry/config writes | Live reload |
+|---|---|---|---|
+| `runProxy` / `dev-network.sh` with `NETWORK_ROLE=proxy` / `boot-proxy.sh` | Shared proxy and lobby only | Initial proxy config and persisted registry ports | No |
+| `runNetwork` / `dev-network.sh` with `NETWORK_ROLE=full` | Proxy, lobby, and its one-project backend | Initial full-stack config | No |
+| `registerBackend` / `register-backend.sh` | Nothing; the external Paper process belongs to its caller | Its name, port, owner metadata, and regenerated config | Yes |
+| `runBackend` / `register-backend.sh` | Its managed Paper backend only | Its name, port, owner metadata, and regenerated config | Yes |
+| `unregisterBackend` / `unregister-backend.sh` | Nothing by default; optional stop is managed-only | Removes its registration and metadata | Yes when the proxy is live |
+| `reload-network.sh` | Nothing | Regenerates config from the registry | Yes |
+
+Only the first two rows can own proxy lifecycle. Registration is a serialized set of registry/config mutations
+plus a reload request, not a filesystem transaction.
 
 ### Agent split (recommended)
 
-The harness is designed for **two agent roles**:
-
-- **Network agent** — boots `dev-network.sh`, owns proxy + lobby + the registry + reloads. Long-lived; the single writer of routing state.
-- **Server agents** — each runs its own Paper instance (its own `runServer`/container), then joins the live network with:
+Start the infrastructure once:
 
 ```bash
-./development-network/bin/register-backend.sh <name> <its-live-port>   # external; never starts/stops the server
+./gradlew runProxy
 ```
 
-No auto-start surprise processes: the harness starts nothing unless you pass a `SERVER_DIR` to register. To leave the network:
+Then each plugin/server agent chooses one backend mode:
 
 ```bash
-./development-network/bin/unregister-backend.sh <name>        # drop routing only
-./development-network/bin/unregister-backend.sh <name> --stop # also stop the server (managed only)
+# Managed mode: this task starts/stops Paper for this project.
+./gradlew runBackend
+
+# External mode: runServer (or another process) already owns Paper.
+./gradlew registerBackend \
+  -PnetworkBackend=hero \
+  -PnetworkBackendPort=30070 \
+  -PnetworkRegistrationOwner=agent-hero
+```
+
+`runBackend` owns the managed Paper process and unregisters it on exit. `registerBackend` only verifies and
+registers the already-running external server; it returns after registration and never starts or stops Paper.
+Neither task can claim the shared proxy. `runNetwork` remains a one-project convenience composite; use the
+explicit `runProxy` plus one backend task per plugin project whenever multiple projects share a `BASE`.
+
+To leave a manually registered backend:
+
+```bash
+REGISTRATION_OWNER=agent-hero \
+  ./development-network/bin/unregister-backend.sh hero
+REGISTRATION_OWNER=agent-hero \
+  ./development-network/bin/unregister-backend.sh hero --stop
+./development-network/bin/unregister-backend.sh hero --force  # network-owner cleanup
 ./development-network/bin/reload-network.sh                   # re-apply registry (idempotent)
 ```
 
-Port safety: every resolved port is persisted in `runtime/<name>.port` (by boot-proxy, boot-backend, and register-backend), so a runtime reindex never moves a live server, and concurrent registrations are serialized by a flock on `runtime/register.lock` — concurrent agents never pick the same port, and the last reload wins with the full registry.
+Port safety: every resolved port is persisted in `runtime/<name>.port` so a runtime reindex never moves a live
+server. Concurrent registrations are serialized by `runtime/register.lock`; a second owner cannot claim an
+existing backend name or port.
 
-## Gradle integration: `runNetwork` task
+## Gradle integration: `runProxy`, `runBackend`, and `registerBackend`
 
-The harness ships as a Gradle plugin (`io.github.development-network`, module `network/`). Once wired, plugin projects spawn the whole network — proxy + lobby + their managed backend — with automatic port registration, instead of a bare `runServer`.
+The harness ships as a Gradle plugin (`io.github.development-network`, module `network/`). It exposes separate
+tasks for shared infrastructure, managed Paper, and external registrations:
+
+- `runProxy` starts the shared proxy and lobby and holds the infrastructure ownership lease.
+- `runBackend` builds this project's jar, starts its managed Paper backend, registers it, and owns that backend
+  until the task exits.
+- `registerBackend` attaches an already-running external Paper server. It does not build a jar or start/stop
+  Paper.
+- `unregisterBackend` removes this project's external registration without stopping its Paper process.
+- `runNetwork` remains the one-project convenience task that starts the full stack. It is not the multi-agent
+  coordination primitive.
+
+For a shared network, run `runProxy` once from the network/controller project, then choose `runBackend` or
+`registerBackend` from each plugin project. A plugin project running either backend task cannot claim the proxy.
 
 ### Standalone `plugin-multiplexer`
 
@@ -164,7 +269,9 @@ plugins {
 }
 ```
 
-When the plugin is used through a composite build (`includeBuild`), `runNetwork` auto-discovers the harness `bin/` directory from the included build. If the repo is not included as a composite build, set the harness path explicitly:
+When the plugin is used through a composite build (`includeBuild`), the Gradle tasks auto-discover the harness
+`bin/` directory from the included build. If the repo is not included as a composite build, set the harness path
+explicitly:
 
 ```bash
 export DEV_NETWORK_BIN=/path/to/plugin-multiplexer/bin
@@ -174,23 +281,41 @@ export DEV_NETWORK_DIR=/path/to/plugin-multiplexer
 
 ### Vendored as a `server-development-skills` submodule
 
-`server-development-skills` vendors this harness as a Git submodule at `development-network/`. Use the submodule path exactly as before:
+`server-development-skills` vendors this harness as a Git submodule at `development-network/`. Use the submodule
+path exactly as before:
 
 ```kotlin
 includeBuild("./development-network/network")
 ```
 
 ```bash
-./gradlew runNetwork
-# -PnetworkBackend=<name>   backend name (default: project.name)
-# -PnetworkBase=<dir>       network runtime dir (default: run/network)
+./gradlew runProxy
+# -PnetworkBase=<dir>       shared network runtime dir (default: run/network)
 # -PnetworkProxyPort=<n>    proxy port (default: 25565; 0 = auto-pick free port)
+
+./gradlew runBackend
+# -PnetworkBackend=<name>   backend name (default: project.name)
 # -PnetworkJarTask=<name>   Jar task to deploy (default: "jar")
-# -PdevNetworkBin=<dir>     harness bin (default: auto-discovered from included build, $DEV_NETWORK_BIN, $DEV_NETWORK_DIR, or ROOT/development-network/bin)
-# -PnetworkDevUsers=<name>  accounts to op on every backend (default: $DEV_NETWORK_DEV_USERS env, else "dev"; use your real client profile name)
+# -PnetworkDevUsers=<name>  accounts to op on the managed backend (default:
+#                           $DEV_NETWORK_DEV_USERS env, else "dev")
+
+./gradlew registerBackend
+# -PnetworkBackend=<name>           external backend name (default: project.name)
+# -PnetworkBackendPort=<port>       port already used by Paper
+# -PnetworkRegistrationOwner=<id>   stable owner token for register/unregister
+
+./gradlew unregisterBackend
+# uses networkBackend and networkRegistrationOwner
 ```
 
-`runNetwork` builds the jar (its actual `archiveFile`, so shadowJar/archive overrides work), copies it into `runtime/auto/<name>/plugins/`, finds free ports, spawns the network with the harness, and blocks like run-paper; Ctrl-C tears it all down. The Kotlin pin is **2.4.0** (Gradle 9.7.1 bundles 2.4.0; older Kotlin fails the applied-script/Kotlin-module checks), and the task class must stay `abstract` (Gradle requirement).
+`runBackend` builds the jar using its actual `archiveFile`, copies it into the isolated backend, asks
+`register-backend.sh` to start/register that backend, and blocks like `runServer`; Ctrl-C unregisters and stops
+only that managed backend. `registerBackend` requires an already-running Paper server and returns after verifying
+and registering it; it never builds, starts, or stops Paper. `unregisterBackend` removes only that external
+registration. `runProxy` owns the proxy/lobby process and remains up until its task is stopped. The Kotlin pin
+is **2.4.0** (Gradle 9.7.1 bundles 2.4.0; older Kotlin fails the applied-script/Kotlin-module checks), and
+task classes must stay `abstract` (Gradle requirement).
+
 
 ## Repository structure
 
@@ -200,10 +325,13 @@ This harness lives in its own repository: **`aincraft-org/plugin-multiplexer`**.
 ```
 .
 ├── SKILL.md
-├── bin/                        # shell harness (boot, stop, status, register, ...)
-└── network/                    # Gradle plugin (io.github.development-network)
-    ├── build.gradle.kts
-    └── src/main/kotlin/…
+├── network/                    # Gradle plugin (io.github.development-network)
+│   ├── build.gradle.kts
+│   └── src/main/kotlin/…
+├── velocity-plugin/            # Velocity proxy plugin
+│   ├── build.gradle.kts
+│   └── src/main/java/…
+└── bin/                        # shell harness (boot, stop, status, register, ...)
 ```
 
 To update the submodule pin: `git submodule update --init -- development-network` in `server-development-skills`, or check out a newer tag in the `plugin-multiplexer` repo and update the gitlink.

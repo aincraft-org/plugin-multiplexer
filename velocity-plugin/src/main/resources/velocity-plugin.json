@@ -1,0 +1,8 @@
+{
+  "id": "proxy-inspector",
+  "name": "Proxy Inspector",
+  "version": "${version}",
+  "description": "Lists registered proxy servers and loaded Velocity plugins",
+  "authors": ["aincraft"],
+  "main": "io.github.aincraft.proxyinspector.ProxyInspectorPlugin"
+}

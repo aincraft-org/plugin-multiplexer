@@ -1,39 +1,22 @@
 #!/usr/bin/env bash
-# Hot-registers a backend into a RUNNING dev network without restarting the
-# proxy. This is the agent-side runtime registration entry point: another
-# process/agent can join its Paper server to an already-booted Velocity
-# network by calling this script.
+# Registers one backend with a RUNNING, independently-owned proxy.
 #
 # Usage: register-backend.sh <NAME> [PORT] [SERVER_DIR]
 #   <NAME>       valid backend name ([A-Za-z0-9_-]+)
-#   [PORT]       explicit port; default = next free port from 30067.
-#                For an EXTERNAL server the port MUST be the port it is
-#                already listening on (the in-use check is skipped for the
-#                external path for exactly that reason).
+#   [PORT]       explicit port; default = next free port for a managed backend.
+#                An external backend must already be listening on its port.
 #   [SERVER_DIR] server folder to BOOT (managed backend). Omit to register an
-#                already-running server on the given port (EXTERNAL semantics:
-#                never started, never stopped — but its modern-forwarding
-#                config is YOUR responsibility, as with boot-external.sh).
+#                already-running server (external semantics: never started,
+#                never stopped).
 #
-# What it does:
-#   1. appends <NAME> to runtime/backends.txt
-#   2. under a flock on runtime/register.lock: scans a port that is neither
-#      bound nor reserved in any runtime/<other>.port file, and RESERVES it
-#      by writing runtime/<NAME>.port — concurrent agents never pick the same
-#      port (the reservation is what the scan skips).
-#   3. (optional) boots the server dir (with the reserved port) and waits for
-#      ready; external path verifies the live port and marks ready
-#   4. re-locks, regenerates velocity.toml with the SAME generator the proxy
-#      used at boot (velocity-toml.sh honors the persisted .port), sends
-#      "velocity reload" via runtime/velocity.cmd — the proxy re-reads
-#      velocity.toml LIVE and routes to the new backend; NO proxy restart.
+# Ownership:
+#   REGISTRATION_OWNER identifies the caller and is persisted in
+#   runtime/<NAME>.owner. A duplicate name is rejected; unregister requires the
+#   same owner or an explicit --force.
 #
-# The lock is released during the (minutes-long) managed boot so another agent
-# can register in parallel; the fd stays open and is re-acquired for the final
-# registry write, so the last registration wins with the FULL registry.
-#
-# Teardown: bin/unregister-backend.sh <NAME> [--stop], or stop-dev-network.sh
-# (which stops every managed backend; externals have no pidfile).
+# The proxy is never started or stopped here. Registry, port reservations,
+# ownership metadata, config regeneration, and live reload are serialized by
+# runtime/register.lock.
 
 set -eo pipefail
 
@@ -45,96 +28,236 @@ SERVER_DIR="${3:-}"
 
 BASE="${BASE:-$PWD/development-network}"
 BIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REGISTRATION_OWNER="${REGISTRATION_OWNER:-manual-${HOSTNAME:-local}-$$}"
+[[ "$REGISTRATION_OWNER" =~ ^[A-Za-z0-9_.:/-]+$ ]] \
+  || { echo "invalid REGISTRATION_OWNER: $REGISTRATION_OWNER" >&2; exit 1; }
 
-[ -f "$BASE/runtime/proxy.pid" ] || { echo "register: no running proxy (missing runtime/proxy.pid); boot the network first" >&2; exit 1; }
-[ -f "$BASE/runtime/proxy.ready" ] || { echo "register: proxy not ready yet (no runtime/proxy.ready)" >&2; exit 1; }
+MODE="external"
+[ -n "$SERVER_DIR" ] && MODE="managed"
 
 mkdir -p "$BASE/runtime" "$BASE/logs"
 
 REGISTRY_FILE="$BASE/runtime/backends.txt"
+OWNER_FILE="$BASE/runtime/$NAME.owner"
+PORT_FILE="$BASE/runtime/$NAME.port"
+READY_FILE="$BASE/runtime/$NAME.ready"
+PID_FILE="$BASE/runtime/$NAME.pid"
+
+read_owner() {
+  [ -f "$1" ] || return 0
+  sed -n 's/^owner=//p' "$1" | sed -n '1p'
+}
+
+proxy_controller_lock_held() {
+  exec 9>"$BASE/runtime/proxy.lock"
+  if flock -n 9; then
+    flock -u 9
+    exec 9>&-
+    return 1
+  fi
+  exec 9>&-
+  return 0
+}
+
+proxy_controller_alive() {
+  local controller_pid proxy_pid
+  [ -f "$BASE/runtime/proxy.owner" ] || return 1
+  controller_pid="$(sed -n 's/^pid=//p' "$BASE/runtime/proxy.owner" | sed -n '1p')"
+  [[ "$controller_pid" =~ ^[0-9]+$ ]] || return 1
+  kill -0 "$controller_pid" 2>/dev/null || return 1
+  [ -f "$BASE/runtime/proxy.pid" ] || return 1
+  proxy_pid="$(cat "$BASE/runtime/proxy.pid")"
+  [[ "$proxy_pid" =~ ^[0-9]+$ ]] || return 1
+  kill -0 "$proxy_pid" 2>/dev/null || return 1
+  proxy_controller_lock_held || return 1
+  [ -f "$BASE/runtime/proxy.ready" ]
+}
 
 port_bound() { # <port> -> 0 iff nothing is listening
   ! (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null
 }
 
-port_reserved() { # <port> -> 0 iff no runtime/*.port file claims it
-  local f
+port_claimed_by_other() { # <port> -> 0 iff no active registration claims it
+  local candidate="$1" f other
   for f in "$BASE/runtime"/*.port; do
     [ -f "$f" ] || continue
-    [ "$(cat "$f")" = "$1" ] && return 1
+    [ "$f" = "$PORT_FILE" ] && continue
+    if [ "$(cat "$f")" = "$candidate" ]; then
+      other="${f##*/}"
+      other="${other%.port}"
+      if [ -f "$BASE/runtime/$other.owner" ] || grep -qx "$other" "$REGISTRY_FILE"; then
+        return 1
+      fi
+    fi
   done
   return 0
 }
 
-# --- section 1: registry + port reservation (serialized) ---------------------
+valid_port() {
+  [[ "$1" =~ ^[0-9]+$ ]] && [ "$1" -ge 1024 ] && [ "$1" -le 65535 ]
+}
+
+write_owner() {
+  local state="$1" pid="${2:-}" tmp="$OWNER_FILE.tmp.$$"
+  {
+    printf 'owner=%s\n' "$REGISTRATION_OWNER"
+    printf 'mode=%s\n' "$MODE"
+    printf 'state=%s\n' "$state"
+    printf 'port=%s\n' "$PORT"
+    printf 'server_dir=%s\n' "$SERVER_DIR"
+    printf 'pid=%s\n' "$pid"
+    printf 'updated_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  } > "$tmp"
+  mv -f "$tmp" "$OWNER_FILE"
+}
+
+REGISTRY_ADDED=0
+REGISTRATION_COMMITTED=0
+BOOT_PID=""
+
+cleanup_failed() {
+  [ "$REGISTRY_ADDED" = 1 ] || return 0
+  [ "$REGISTRATION_COMMITTED" = 0 ] || return 0
+
+  if [ -n "$BOOT_PID" ] && kill -0 "$BOOT_PID" 2>/dev/null; then
+    kill "$BOOT_PID" 2>/dev/null || true
+  fi
+
+  flock 8 2>/dev/null || true
+  CURRENT_OWNER="$(read_owner "$OWNER_FILE")"
+  if [ -z "$CURRENT_OWNER" ] || [ "$CURRENT_OWNER" = "$REGISTRATION_OWNER" ]; then
+    sed -i "/^$NAME\$/d" "$REGISTRY_FILE"
+    rm -f "$OWNER_FILE" "$PORT_FILE" "$READY_FILE" "$BASE/runtime/$NAME.auto-dir"
+  fi
+  flock -u 8 2>/dev/null || true
+}
+trap cleanup_failed EXIT
+
+[ -f "$BASE/runtime/proxy.pid" ] || { echo "register: no running proxy" >&2; exit 1; }
+[ -f "$BASE/runtime/proxy.ready" ] || { echo "register: proxy not ready" >&2; exit 1; }
+proxy_controller_alive || {
+  echo "register: proxy is not controlled by a live runProxy/dev-network controller" >&2
+  exit 1
+}
+
+# --- reserve registry entry, port, and owner atomically ----------------------
 exec 8>"$BASE/runtime/register.lock"
 flock 8
+proxy_controller_alive || {
+  echo "register: proxy controller stopped before registration" >&2
+  exit 1
+}
 
 touch "$REGISTRY_FILE"
-if ! grep -qx "$NAME" "$REGISTRY_FILE"; then
-  printf '%s\n' "$NAME" >> "$REGISTRY_FILE"
+if grep -qx "$NAME" "$REGISTRY_FILE"; then
+  CURRENT_OWNER="$(read_owner "$OWNER_FILE")"
+  if [ -n "$CURRENT_OWNER" ]; then
+    echo "register: backend '$NAME' is already owned by $CURRENT_OWNER" >&2
+  else
+    echo "register: backend '$NAME' is already registered without owner metadata" >&2
+  fi
+  echo "register: choose a unique name or unregister it with --force" >&2
+  exit 1
 fi
+printf '%s\n' "$NAME" >> "$REGISTRY_FILE"
+REGISTRY_ADDED=1
 
+EXPLICIT_PORT="$PORT"
 if [ -n "$PORT" ]; then
-  [[ "$PORT" =~ ^[0-9]+$ ]] && [ "$PORT" -ge 1024 ] && [ "$PORT" -le 65535 ] \
-    || { echo "invalid port: $PORT" >&2; exit 1; }
-else
-  PORT=30067
-  while :; do
-    if port_bound "$PORT" && port_reserved "$PORT"; then
-      break
-    fi
-    PORT=$((PORT + 1))
+  valid_port "$PORT" || { echo "invalid port: $PORT" >&2; exit 1; }
+elif [ "$MODE" = "external" ]; then
+  # An external server has no process for this script to start. Use the
+  # deterministic default only to produce a useful missing-listener error.
+  IDX=0
+  for x in $(printf '%s\n' "$(cat "$REGISTRY_FILE")" | sort -u); do
+    [ "$x" = "$NAME" ] && break
+    IDX=$((IDX + 1))
   done
-  exec 3>&- 3<&- 2>/dev/null || true
+  PORT=$((30067 + IDX))
 fi
-echo "   register: $NAME -> port $PORT"
-printf '%s\n' "$PORT" > "$BASE/runtime/$NAME.port"   # reservation
-REGISTRY="$(printf '%s ' $(cat "$REGISTRY_FILE"))"
 
-# --- section 2: boot (lock released; other agents may register) --------------
-flock -u 8   # UNLOCK but KEEP fd 8 open for the re-acquire in section 3
-if [ -n "$SERVER_DIR" ]; then
-  if ! port_bound "$PORT"; then
-    echo "register: port $PORT already in use; pick another or stop the other server" >&2
+if [ "$MODE" = "managed" ]; then
+  if [ -z "$EXPLICIT_PORT" ]; then
+    PORT=30067
+    while ! port_bound "$PORT" || ! port_claimed_by_other "$PORT"; do
+      PORT=$((PORT + 1))
+      [ "$PORT" -le 65535 ] || { echo "register: no free backend port" >&2; exit 1; }
+    done
+  else
+    port_claimed_by_other "$PORT" || { echo "register: port $PORT is already claimed" >&2; exit 1; }
+    port_bound "$PORT" || { echo "register: port $PORT is already in use" >&2; exit 1; }
+  fi
+else
+  port_claimed_by_other "$PORT" || { echo "register: port $PORT is already claimed" >&2; exit 1; }
+  if port_bound "$PORT"; then
+    echo "register: external server is not listening on $PORT" >&2
     exit 1
   fi
-  setsid "$BIN_DIR/boot-backend.sh" "$NAME" >> "$BASE/logs/$NAME.log" 2>&1 8>&- &
-  REG_PID=$!
+fi
+
+printf '%s\n' "$PORT" > "$PORT_FILE"
+write_owner registering
+REGISTRY="$(printf '%s ' "$(cat "$REGISTRY_FILE")")"
+echo "   register: $NAME -> port $PORT (owner $REGISTRATION_OWNER)"
+flock -u 8
+
+# --- optional managed boot, lock released while Paper starts -----------------
+if [ "$MODE" = "managed" ]; then
+  if ! port_bound "$PORT"; then
+    echo "register: port $PORT became occupied before managed boot" >&2
+    exit 1
+  fi
+  setsid env BASE="$BASE" BACKENDS="$REGISTRY" \
+    SERVER_DIR="$SERVER_DIR" DEV_USERS="${DEV_USERS:-dev}" TARGET_SERVER="${TARGET_SERVER:-localhost}" \
+    "$BIN_DIR/boot-backend.sh" "$NAME" >> "$BASE/logs/$NAME.log" 2>&1 8>&- &
+  BOOT_PID=$!
   for _ in $(seq 1 300); do
-    if [ -f "$BASE/runtime/$NAME.ready" ]; then
-      break
-    fi
-    if ! kill -0 "$REG_PID" 2>/dev/null; then
+    [ -f "$READY_FILE" ] && break
+    if ! kill -0 "$BOOT_PID" 2>/dev/null; then
       echo "register: $NAME boot failed" >&2
       exit 1
     fi
     sleep 1
   done
-  if [ ! -f "$BASE/runtime/$NAME.ready" ]; then
+  if [ ! -f "$READY_FILE" ]; then
     echo "register: $NAME did not become ready in 300s" >&2
     exit 1
   fi
   echo "   register: $NAME server is up"
 else
-  # External server: must already be listening on the given (or picked) port.
+  # External server: it must have remained reachable after reservation.
   if port_bound "$PORT"; then
-    echo "register: nothing listening on $PORT — external server must be running before registration" >&2
+    echo "register: external server is not listening on $PORT" >&2
     exit 1
   fi
-  touch "$BASE/runtime/$NAME.ready"
+  touch "$READY_FILE"
 fi
 
-# --- section 3: toml regen + live reload (serialized last-writer-wins) -------
-flock 8   # re-acquire; the last regen writes the FULL registry
-if [ -z "${PROXY_PORT:-}" ]; then
-  PROXY_PORT="$(sed -n 's/^bind = "0.0.0.0:\([0-9][0-9]*\)".*/\1/p' "$BASE/runtime/velocity.toml" | head -1)"
-  PROXY_PORT="${PROXY_PORT:-25565}"
+# --- regenerate config and reload under the final serialized write -----------
+flock 8
+if [ "$(read_owner "$OWNER_FILE")" != "$REGISTRATION_OWNER" ]; then
+  echo "register: backend '$NAME' ownership changed while it was starting" >&2
+  exit 1
 fi
-( export BASE BACKENDS="$(printf '%s ' $(cat "$REGISTRY_FILE"))" PROXY_PORT="$PROXY_PORT"
+
+PID=""
+[ -f "$PID_FILE" ] && PID="$(cat "$PID_FILE")"
+write_owner ready "$PID"
+REGISTRY="$(printf '%s ' "$(cat "$REGISTRY_FILE")")"
+if [ -n "${PROXY_PORT:-}" ]; then
+  GENERATOR_PROXY_PORT="$PROXY_PORT"
+else
+  GENERATOR_PROXY_PORT="$(sed -n 's/^bind = "0.0.0.0:\([0-9][0-9]*\)".*/\1/p' "$BASE/runtime/velocity.toml" | sed -n '1p')"
+  GENERATOR_PROXY_PORT="${GENERATOR_PROXY_PORT:-25565}"
+fi
+(
+  export BASE BACKENDS="$REGISTRY" PROXY_PORT="$GENERATOR_PROXY_PORT"
+  # shellcheck source=velocity-toml.sh
   . "$BIN_DIR/velocity-toml.sh"
-  write_velocity_toml )
+  write_velocity_toml
+)
 
+# shellcheck disable=SC2031
 if [ -p "$BASE/runtime/velocity.cmd" ]; then
   printf 'velocity reload\n' > "$BASE/runtime/velocity.cmd"
   echo "   register: velocity reload sent; proxy is routing to $NAME now"
@@ -143,4 +266,5 @@ else
   exit 1
 fi
 
-echo "   connect:  /server $NAME (proxy at localhost:${PROXY_PORT:-25565})"
+REGISTRATION_COMMITTED=1
+echo "   connect:  /server $NAME (proxy at localhost:$GENERATOR_PROXY_PORT)"

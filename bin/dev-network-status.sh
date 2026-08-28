@@ -29,7 +29,7 @@ for name in $REGISTRY; do
   else
     IDX=0
     P=30067
-    for x in $(printf '%s\n' $REGISTRY | sort -u); do
+    for x in $(printf '%s\n' "$REGISTRY" | tr ' ' '\n' | sort -u); do
       if [ "$x" = "$name" ]; then
         P=$((30067 + IDX))
         break

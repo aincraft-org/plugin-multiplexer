@@ -1,0 +1,65 @@
+name: Stable release
+
+on:
+  push:
+    tags:
+      - '20*.*.*.*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: CalVer release version (YYYY.MM.DD.<run>)
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: stable-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Publish stable artifacts
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Set up Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '25'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Resolve release version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [ -n "$INPUT_VERSION" ]; then
+            VERSION="$INPUT_VERSION"
+          elif [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            VERSION="$GITHUB_REF_NAME"
+          else
+            VERSION="$(date -u +%Y.%m.%d).${GITHUB_RUN_NUMBER}"
+          fi
+          [[ "$VERSION" =~ ^[0-9]{4}\.[0-9]{2}\.[0-9]{2}\.[0-9]+$ ]]
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
+      - name: Build and verify release
+        run: ./gradlew -PbuildVersion="$VERSION" clean check assemble
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release create "$VERSION" \
+            network/build/libs/*.jar \
+            velocity-plugin/build/libs/*.jar \
+            --title "$VERSION" \
+            --generate-notes

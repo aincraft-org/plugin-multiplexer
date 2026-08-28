@@ -1,0 +1,53 @@
+name: Nightly release
+
+on:
+  schedule:
+    - cron: '0 4 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: nightly-release
+  cancel-in-progress: false
+
+jobs:
+  nightly:
+    name: Publish nightly artifacts
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Set up Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '25'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Build and verify
+        run: ./gradlew clean check
+
+      - name: Assemble nightly version
+        run: |
+          set -euo pipefail
+          VERSION="$(date -u +%Y.%m.%d).${GITHUB_RUN_NUMBER}"
+          ./gradlew -PbuildVersion="$VERSION" assemble
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
+      - name: Replace rolling nightly release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release delete nightly --cleanup-tag --yes || true
+          gh release create nightly \
+            network/build/libs/*.jar \
+            velocity-plugin/build/libs/*.jar \
+            --prerelease \
+            --title "Nightly $VERSION" \
+            --notes "Automated nightly build from ${GITHUB_SHA}."

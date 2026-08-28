@@ -126,7 +126,7 @@ SERVER_PID=$!
 echo "$SERVER_PID" > "$BASE/runtime/lobby.pid"
 trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
 
-for i in $(seq 1 240); do
+for _ in $(seq 1 240); do
   if (exec 3<>"/dev/tcp/127.0.0.1/$SERVER_PORT") 2>/dev/null; then
     exec 3>&- 3<&-
     touch "$BASE/runtime/lobby.ready"

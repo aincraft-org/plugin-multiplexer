@@ -10,51 +10,112 @@
 #             (e.g. a plugin's own runServer) without managing their lifecycle;
 #             boot-external.sh configures + registers them.
 # Runtime:    $BASE (default ./development-network).
-# Teardown:  Ctrl-C here (SIGINT to all booters; their EXIT traps stop java),
-#            or ./bin/stop-dev-network.sh.
+# Role:       NETWORK_ROLE=full (default) owns proxy+lobby+listed backends;
+#             NETWORK_ROLE=proxy owns only proxy+lobby for shared agent mode.
+# Teardown:   Ctrl-C here (SIGINT to all booters; their EXIT traps stop java),
+#             or ./bin/stop-dev-network.sh.
 
 set -eo pipefail
 
 BASE="${BASE:-$PWD/development-network}"
 BIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+NETWORK_ROLE="${NETWORK_ROLE:-full}"
+PROXY_PORT="${PROXY_PORT:-25565}"
+TARGET_SERVER="${TARGET_SERVER:-localhost}"
+
+case "$NETWORK_ROLE" in
+  full|proxy) ;;
+  *) echo "!! dev-network: invalid NETWORK_ROLE '$NETWORK_ROLE' (use full or proxy)" >&2; exit 1 ;;
+esac
 
 mkdir -p "$BASE/logs" "$BASE/runtime"
 
-# Auto-discovery FIRST: any folder in runtime/auto/<NAME>/ (with your plugin
-# jar in its plugins/ dir) is a MANAGED backend — the harness generates its
-# config (forwarding secret, ops), picks its port, and boots it. Zero env
-# vars. The proxy cannot start servers; the harness does, and it manages them.
+# One controller owns the proxy/lobby for the lifetime of this process. The
+# advisory lock is authoritative; proxy.owner makes failures explainable and
+# lets registration reject stale proxy pid/ready markers.
+exec 7>"$BASE/runtime/proxy.lock"
+if ! flock -n 7; then
+  CURRENT_OWNER="$(sed -n 's/^owner=//p' "$BASE/runtime/proxy.owner" 2>/dev/null | sed -n '1p' || true)"
+  if [ -n "$CURRENT_OWNER" ]; then
+    echo "!! dev-network: proxy already owned by $CURRENT_OWNER (BASE=$BASE)" >&2
+  else
+    echo "!! dev-network: proxy is already controlled for BASE=$BASE" >&2
+  fi
+  exit 1
+fi
+
+PROXY_OWNER_ID="${PROXY_OWNER_ID:-proxy-controller-${HOSTNAME:-local}-$$}"
+PROXY_OWNER_FILE="$BASE/runtime/proxy.owner"
+OWNER_TMP="$PROXY_OWNER_FILE.tmp.$$"
+{
+  printf 'owner=%s\n' "$PROXY_OWNER_ID"
+  printf 'pid=%s\n' "$$"
+  printf 'port=%s\n' "$PROXY_PORT"
+  printf 'role=%s\n' "$NETWORK_ROLE"
+  printf 'started_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+} > "$OWNER_TMP"
+mv -f "$OWNER_TMP" "$PROXY_OWNER_FILE"
+
+# A failed startup must not leave markers that make a later registration
+# believe a dead controller is still serving.
+rm -f "$BASE/runtime/proxy.ready" "$BASE/runtime/proxy.pid"
+
+cleanup_owner() {
+  if [ -f "$PROXY_OWNER_FILE" ] \
+    && [ "$(sed -n 's/^owner=//p' "$PROXY_OWNER_FILE" | sed -n '1p')" = "$PROXY_OWNER_ID" ]; then
+    rm -f "$PROXY_OWNER_FILE"
+  fi
+  flock -u 7 2>/dev/null || true
+}
+trap cleanup_owner EXIT
+
+# Auto-discovery is a full-network convenience. A proxy-only controller uses
+# the persisted registry but never starts those backends.
 AUTO_NAMES=""
-if [ -d "$BASE/runtime/auto" ]; then
-  for d in "$BASE/runtime/auto"/*/; do
-    [ -d "$d" ] || continue
-    AUTO_NAMES="$AUTO_NAMES $(basename "$d")"
-  done
-fi
-AUTO_NAMES="$(printf '%s\n' $AUTO_NAMES | sort -u | tr '\n' ' ')"
-
-# Resolve registry: explicit BACKENDS wins; else AUTO dirs REPLACE the
-# persisted file (drop-in mode owns the registry); else persisted file;
-# else default dev.
-if [ -n "${BACKENDS:-}" ]; then
-  printf '%s\n' $BACKENDS > "$BASE/runtime/backends.txt"
-elif [ -n "$AUTO_NAMES" ]; then
-  BACKENDS=""
-elif [ -f "$BASE/runtime/backends.txt" ]; then
-  BACKENDS="$(cat "$BASE/runtime/backends.txt")"
+if [ "$NETWORK_ROLE" = "proxy" ]; then
+  if [ -z "${BACKENDS+x}" ]; then
+    BACKENDS="$(cat "$BASE/runtime/backends.txt" 2>/dev/null || true)"
+  fi
 else
-  printf '%s\n' dev > "$BASE/runtime/backends.txt"
-  BACKENDS=dev
+  if [ -d "$BASE/runtime/auto" ]; then
+    for d in "$BASE/runtime/auto"/*/; do
+      [ -d "$d" ] || continue
+      AUTO_NAMES="$AUTO_NAMES $(basename "$d")"
+    done
+  fi
+  AUTO_NAMES="$(printf '%s\n' "$AUTO_NAMES" | tr ' ' '\n' | sort -u | tr '\n' ' ')"
+
+  # Resolve registry: explicit BACKENDS wins; else AUTO dirs REPLACE the
+  # persisted file (drop-in mode owns the registry); else persisted file;
+  # else default dev.
+  if [ -n "${BACKENDS:-}" ]; then
+    printf '%s\n' "$BACKENDS" | tr ' ' '\n' > "$BASE/runtime/backends.txt"
+  elif [ -n "$AUTO_NAMES" ]; then
+    BACKENDS=""
+  elif [ -f "$BASE/runtime/backends.txt" ]; then
+    BACKENDS="$(cat "$BASE/runtime/backends.txt")"
+  else
+    printf '%s\n' dev > "$BASE/runtime/backends.txt"
+    BACKENDS=dev
+  fi
 fi
 
-REGISTRY="$(printf '%s\n' $BACKENDS $AUTO_NAMES ${EXTERNAL_BACKENDS:-} | sort -u)"
-printf '%s\n' $REGISTRY > "$BASE/runtime/backends.txt"
+if [ "$NETWORK_ROLE" = "proxy" ]; then
+  REGISTRY="$(printf '%s\n' "$BACKENDS" | tr ' ' '\n' | sort -u)"
+else
+  REGISTRY="$(printf '%s\n' "$BACKENDS" "$AUTO_NAMES" "${EXTERNAL_BACKENDS:-}" | tr ' ' '\n' | sort -u)"
+fi
+if [ -n "$REGISTRY" ]; then
+  printf '%s\n' "$REGISTRY" > "$BASE/runtime/backends.txt"
+else
+  : > "$BASE/runtime/backends.txt"
+fi
 
 echo "== auto-discovered backends: ${AUTO_NAMES:-none}"
+echo "== network role: $NETWORK_ROLE"
 
 # --- free-port pass ----------------------------------------------------------
-PROXY_PORT="${PROXY_PORT:-25565}"
-port_free() { # <port> → 0 if free, 1 if in use
+port_free() { # <port> -> 0 if free, 1 if in use
   ! (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null
 }
 if ! port_free "$PROXY_PORT"; then
@@ -63,52 +124,80 @@ fi
 if ! port_free 30066; then
   echo "!! dev-network: lobby port 30066 already in use" >&2; exit 1
 fi
-# One shared mapping: explicit PORT_<NAME> wins; else DEFAULT = 30067 +
-# sorted-registry index (the EXACT math boot-backend.sh/boot-external.sh use
-# to agree with the proxy). Reserve external + explicit managed ports FIRST,
-# then assign auto ports, skipping anything already reserved/occupied.
-RESERVED=""
-for name in $REGISTRY; do
-  KEY="PORT_${name^^}"
-  if printf '%s\n' ${EXTERNAL_BACKENDS:-} | grep -qx "$name"; then
-    # External: reserve its explicit port, or its sorted-index default — never
-    # reassign a live server's port, and never let a managed backend take it.
-    if [ -n "${!KEY:-}" ]; then
-      P="${!KEY}"
-      echo "   $name (external) -> port $P (explicit)"
-    else
+
+if [ "$NETWORK_ROLE" = "full" ]; then
+  # One shared mapping: explicit PORT_<NAME> wins; otherwise use a persisted
+  # live port or DEFAULT = 30067 + sorted-registry index. Persist every
+  # resolved port so names containing '-' do not depend on shell variables and
+  # later reindexing never moves a live backend.
+  port_override() {
+    local name="$1" key
+    if [[ "$name" =~ ^[A-Za-z0-9_]+$ ]]; then
+      key="PORT_${name^^}"
+      printf '%s' "${!key:-}"
+    fi
+  }
+  port_valid() {
+    [[ "$1" =~ ^[0-9]+$ ]] && [ "$1" -ge 1024 ] && [ "$1" -le 65535 ]
+  }
+  port_reserved_in_pass() {
+    local candidate="$1" reserved
+    for reserved in $RESERVED; do
+      [ "$reserved" = "$candidate" ] && return 0
+    done
+    return 1
+  }
+  RESERVED=""
+
+  # Reserve external + explicit managed ports FIRST, then assign auto ports,
+  # skipping anything already reserved or occupied.
+  for name in $REGISTRY; do
+    IS_EXTERNAL=0
+    if printf '%s\n' "${EXTERNAL_BACKENDS:-}" | tr ' ' '\n' | grep -qx "$name"; then
+      IS_EXTERNAL=1
+    fi
+    PERSISTED=""
+    [ -f "$BASE/runtime/$name.port" ] && PERSISTED="$(cat "$BASE/runtime/$name.port")"
+    OVERRIDE="$(port_override "$name")"
+    if [ -n "$PERSISTED" ]; then
+      P="$PERSISTED"
+    elif [ -n "$OVERRIDE" ]; then
+      P="$OVERRIDE"
+    elif [ "$IS_EXTERNAL" = 1 ]; then
       IDX=0
       for x in $REGISTRY; do
         [ "$x" = "$name" ] && break
         IDX=$((IDX + 1))
       done
       P=$((30067 + IDX))
-      echo "   $name (external, already running) -> port $P"
+    else
+      continue
     fi
-    export "$KEY=$P"
+    port_valid "$P" || { echo "!! dev-network: invalid port $P for $name" >&2; exit 1; }
+    if port_reserved_in_pass "$P"; then
+      echo "!! dev-network: port $P is claimed more than once" >&2
+      exit 1
+    fi
+    printf '%s\n' "$P" > "$BASE/runtime/$name.port"
     RESERVED="$RESERVED $P"
-  elif [ -n "${!KEY:-}" ]; then
-    P="${!KEY}"
-    echo "   $name -> port $P (explicit)"
-    export "$KEY=$P"
-    RESERVED="$RESERVED $P"
-  fi
-done
-
-port_used() { # <port> -> 0 free, 1 used (occupied or external-reserved)
-  local p="$1"
-  if ! port_free "$p"; then return 1; fi
-  for r in $RESERVED; do
-    [ "$r" = "$p" ] && return 1
+    if [ "$IS_EXTERNAL" = 1 ]; then
+      echo "   $name (external) -> port $P"
+    else
+      echo "   $name -> port $P (explicit)"
+    fi
   done
-  return 0
-}
 
-for name in $REGISTRY; do
-  KEY="PORT_${name^^}"
-  if [ -n "${!KEY:-}" ]; then
-    : # already reserved above (explicit or external)
-  else
+  port_used() { # <port> -> 0 free, 1 used (occupied or reserved)
+    local p="$1"
+    if ! port_free "$p"; then return 1; fi
+    for r in $RESERVED; do
+      [ "$r" = "$p" ] && return 1
+    done
+    return 0
+  }
+
+  for name in $REGISTRY; do
+    [ -f "$BASE/runtime/$name.port" ] && continue
     IDX=0
     for x in $REGISTRY; do
       [ "$x" = "$name" ] && break
@@ -116,13 +205,14 @@ for name in $REGISTRY; do
     done
     P=$((30067 + IDX))
     while ! port_used "$P"; do P=$((P + 1)); done
-    export "$KEY=$P"
+    printf '%s\n' "$P" > "$BASE/runtime/$name.port"
+    RESERVED="$RESERVED $P"
     echo "   $name -> port $P (auto)"
-  fi
-done
+  done
+fi
 
 echo "== dev-network: launching components (logs in $BASE/logs) =="
-echo "== backends: $BACKENDS"
+echo "== backends: ${REGISTRY:-none}"
 echo "== external backends: ${EXTERNAL_BACKENDS:-none}"
 
 PIDS=()
@@ -132,33 +222,39 @@ spawn() {
 }
 
 teardown() {
+  trap - INT TERM EXIT
   echo "== dev-network: shutting down =="
   kill "${PIDS[@]}" 2>/dev/null || true
   for p in "${PIDS[@]}"; do
     wait "$p" 2>/dev/null || true
   done
-  exit 0
+  cleanup_owner
 }
 trap teardown INT TERM EXIT
 
 cd "$BASE"
-spawn "$BIN_DIR/boot-lobby.sh"
-spawn env BACKENDS="$REGISTRY" PROXY_PORT="$PROXY_PORT" "$BIN_DIR/boot-proxy.sh"
-for name in $REGISTRY; do
-  KEY="PORT_${name^^}"
-  PORTA="PORT_${name^^}=${!KEY:-}"
-  if printf '%s\n' ${EXTERNAL_BACKENDS:-} | grep -qx "$name"; then
-    spawn env BACKENDS="$REGISTRY" "$PORTA" "$BIN_DIR/boot-external.sh" "$name"
-  elif [ -d "$BASE/runtime/auto/$name" ]; then
-    spawn env BACKENDS="$REGISTRY" "$PORTA" SERVER_DIR="$BASE/runtime/auto/$name" \
-      "$BIN_DIR/boot-backend.sh" "$name"
-  else
-    spawn env BACKENDS="$REGISTRY" "$PORTA" "$BIN_DIR/boot-backend.sh" "$name"
-  fi
-done
+spawn "$BIN_DIR/boot-lobby.sh" 7>&-
+spawn env BACKENDS="$REGISTRY" PROXY_PORT="$PROXY_PORT" TARGET_SERVER="$TARGET_SERVER" \
+  "$BIN_DIR/boot-proxy.sh" 7>&-
+if [ "$NETWORK_ROLE" = "full" ]; then
+  for name in $REGISTRY; do
+    if printf '%s\n' "${EXTERNAL_BACKENDS:-}" | tr ' ' '\n' | grep -qx "$name"; then
+      spawn env BACKENDS="$REGISTRY" "$BIN_DIR/boot-external.sh" "$name" 7>&-
+    elif [ -d "$BASE/runtime/auto/$name" ]; then
+      spawn env BACKENDS="$REGISTRY" SERVER_DIR="$BASE/runtime/auto/$name" \
+        "$BIN_DIR/boot-backend.sh" "$name" 7>&-
+    else
+      spawn env BACKENDS="$REGISTRY" "$BIN_DIR/boot-backend.sh" "$name" 7>&-
+    fi
+  done
+fi
 
 echo "== waiting for components to become ready =="
-for c in proxy lobby $REGISTRY; do
+WAIT_COMPONENTS="proxy lobby"
+if [ "$NETWORK_ROLE" = "full" ]; then
+  WAIT_COMPONENTS="$WAIT_COMPONENTS $REGISTRY"
+fi
+for c in $WAIT_COMPONENTS; do
   ok=0
   for _ in $(seq 1 240); do
     if [ -f "$BASE/runtime/$c.ready" ]; then
@@ -184,12 +280,15 @@ echo "    Switch with:          /server <name>"
 for name in $REGISTRY; do
   echo "                          /server $name"
 done
-echo "    Console admin:        log in as ${DEV_USERS:-dev} (opped on every server)"
+if [ "$NETWORK_ROLE" = "proxy" ]; then
+  echo "    Proxy controller:     runProxy (backend agents register separately)"
+else
+  echo "    Console admin:        log in as ${DEV_USERS:-dev} (opped on every server)"
+fi
 echo "    Component logs:       $BASE/logs/{proxy,lobby,<name>}.log"
 echo "    Rebuild + restart a backend:"
 echo "        ./bin/restart-backend.sh <name> /path/to/plugin.jar"
 echo "    Stop everything:      Ctrl-C here, or ./bin/stop-dev-network.sh"
 
 # Blocks until all booters exit (booter exit = proxy/backend shutdown).
-# A regular `wait` includes every child; killing is done by the trap above.
 wait

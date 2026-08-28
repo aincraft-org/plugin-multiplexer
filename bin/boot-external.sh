@@ -30,14 +30,16 @@ NAME="${1:?usage: boot-external.sh <NAME>}"
 [[ "$NAME" =~ ^[A-Za-z0-9_-]+$ ]] || { echo "invalid backend name: $NAME" >&2; exit 1; }
 
 BASE="${BASE:-$PWD/development-network}"
-BIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-DIR_KEY="EXTERNAL_DIR_${NAME^^}"
-if [ -n "${!DIR_KEY:-}" ]; then
-  WORKDIR="${!DIR_KEY}"
-elif [ -n "${EXTERNAL_DIR:-}" ]; then
+WORKDIR=""
+if [[ "$NAME" =~ ^[A-Za-z0-9_]+$ ]]; then
+  DIR_KEY="EXTERNAL_DIR_${NAME^^}"
+  WORKDIR="${!DIR_KEY:-}"
+fi
+if [ -z "$WORKDIR" ] && [ -n "${EXTERNAL_DIR:-}" ]; then
   WORKDIR="$EXTERNAL_DIR"
-else
+fi
+if [ -z "$WORKDIR" ]; then
   WORKDIR="$BASE/runtime/external/$NAME"
 fi
 
@@ -46,19 +48,33 @@ fi
 # --- registration + port (same math as boot-proxy.sh) -----------------------
 mkdir -p "$BASE/runtime"
 REGISTRY="${BACKENDS:-$(cat "$BASE/runtime/backends.txt" 2>/dev/null || echo dev)}"
-if ! printf '%s\n' $REGISTRY | grep -qx "$NAME"; then
+if ! grep -qx "$NAME" "$BASE/runtime/backends.txt"; then
   echo "boot-external: '$NAME' is not in the backend registry: $REGISTRY" >&2
   echo "  add it via BACKENDS (persisted in backends.txt) or bump the registry file." >&2
   exit 1
 fi
 
-PORT_KEY="PORT_${NAME^^}"
-if [ -n "${!PORT_KEY:-}" ]; then
-  SERVER_PORT="${!PORT_KEY}"
+if [ -f "$BASE/runtime/$NAME.port" ]; then
+  SERVER_PORT="$(cat "$BASE/runtime/$NAME.port")"
+elif [[ "$NAME" =~ ^[A-Za-z0-9_]+$ ]]; then
+  PORT_KEY="PORT_${NAME^^}"
+  if [ -n "${!PORT_KEY:-}" ]; then
+    SERVER_PORT="${!PORT_KEY}"
+  else
+    IDX=0
+    SERVER_PORT=30067
+    for x in $(printf '%s\n' "$REGISTRY" | tr ' ' '\n' | sort -u); do
+      if [ "$x" = "$NAME" ]; then
+        SERVER_PORT=$((30067 + IDX))
+        break
+      fi
+      IDX=$((IDX + 1))
+    done
+  fi
 else
   IDX=0
   SERVER_PORT=30067
-  for x in $(printf '%s\n' $REGISTRY | sort -u); do
+  for x in $(printf '%s\n' "$REGISTRY" | tr ' ' '\n' | sort -u); do
     if [ "$x" = "$NAME" ]; then
       SERVER_PORT=$((30067 + IDX))
       break
@@ -66,6 +82,7 @@ else
     IDX=$((IDX + 1))
   done
 fi
+printf '%s\n' "$SERVER_PORT" > "$BASE/runtime/$NAME.port"
 
 echo "== boot-external: registered '$NAME' @127.0.0.1:$SERVER_PORT"
 
