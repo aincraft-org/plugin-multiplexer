@@ -140,7 +140,7 @@ text = sys.stdin.read()
 match = re.search(r"(?m)^[ \\t]*name:[ \\t]*([^#\\r\\n]+)", text)
 if not match:
     raise SystemExit(1)
-name = match.group(1).strip().strip("\\\"\'")
+name = match.group(1).strip().strip(chr(34) + chr(39))
 if not name:
     raise SystemExit(1)
 print(name)
