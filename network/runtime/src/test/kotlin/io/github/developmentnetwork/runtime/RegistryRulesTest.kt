@@ -1,0 +1,176 @@
+package io.github.developmentnetwork.runtime
+
+import io.github.developmentnetwork.runtime.model.BackendName
+import io.github.developmentnetwork.runtime.model.BackendNames
+import io.github.developmentnetwork.runtime.model.BackendRegistration
+import io.github.developmentnetwork.runtime.model.OwnershipMode
+import io.github.developmentnetwork.runtime.registry.PortAllocator
+import io.github.developmentnetwork.runtime.registry.RegistryStore
+import io.github.developmentnetwork.runtime.state.RuntimeLayout
+import java.nio.file.Files
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
+import kotlin.test.assertNull
+import kotlin.test.assertTrue
+
+class RegistryRulesTest {
+    @Test
+    fun invalidBackendNamesAreRejected() {
+        listOf("", "has space", "slash/name", "ümlaut", "a.b", "a/b").forEach { raw ->
+            assertFailsWith<IllegalArgumentException> { BackendNames.validate(raw) }
+            assertFailsWith<IllegalArgumentException> { BackendName(raw) }
+        }
+        assertEquals("plugin_1-2", BackendNames.validate("plugin_1-2").value)
+    }
+
+    @Test
+    fun registryNamesAreSortedAndDeduplicatedOnPersistence() {
+        val base = Files.createTempDirectory("registry-names")
+        val layout = RuntimeLayout(base)
+        val store = RegistryStore(layout)
+
+        store.writeNames(listOf(BackendName("zeta"), BackendName("alpha"), BackendName("zeta")))
+
+        assertEquals(listOf(BackendName("alpha"), BackendName("zeta")), store.readNames())
+        assertEquals("alpha\nzeta\n", Files.readString(layout.registryFile))
+    }
+
+    @Test
+    fun persistedPortWinsOverExplicitAndDefault() {
+        val allocator = PortAllocator()
+        val registry = listOf(BackendName("alpha"), BackendName("bravo"))
+
+        assertEquals(
+            30111,
+            allocator.allocate(BackendName("bravo"), registry, persisted = 30111, explicit = 30112,
+                occupied = emptySet(), reserved = emptySet()),
+        )
+        assertEquals(
+            30112,
+            allocator.allocate(BackendName("bravo"), registry, persisted = null, explicit = 30112,
+                occupied = emptySet(), reserved = emptySet()),
+        )
+        assertEquals(
+            30067,
+            allocator.allocate(BackendName("alpha"), registry, persisted = null, explicit = null,
+                occupied = emptySet(), reserved = emptySet()),
+        )
+    }
+
+    @Test
+    fun managedAutomaticAllocationSkipsOccupiedAndReservedPorts() {
+        val allocator = PortAllocator()
+        val registry = listOf(BackendName("alpha"), BackendName("bravo"))
+
+        assertEquals(
+            30069,
+            allocator.allocate(BackendName("alpha"), registry, persisted = null, explicit = null,
+                occupied = setOf(30067), reserved = setOf(30068)),
+        )
+    }
+
+    @Test
+    fun invalidAndCollidingPortsAreRejectedIncludingProxyAndLobby() {
+        val allocator = PortAllocator()
+        val name = BackendName("alpha")
+        val registry = listOf(name)
+
+        listOf(1, 1023, 65536).forEach { port ->
+            assertFailsWith<IllegalArgumentException> {
+                allocator.allocate(name, registry, persisted = port, explicit = null,
+                    occupied = emptySet(), reserved = emptySet())
+            }
+        }
+        listOf(25565, 30066).forEach { port ->
+            assertFailsWith<IllegalArgumentException> {
+                allocator.allocate(name, registry, persisted = null, explicit = port,
+                    occupied = emptySet(), reserved = emptySet())
+            }
+        }
+        assertFailsWith<IllegalArgumentException> {
+            allocator.allocate(name, registry, persisted = null, explicit = 30070,
+                occupied = setOf(30070), reserved = emptySet())
+        }
+        assertFailsWith<IllegalArgumentException> {
+            allocator.allocate(name, registry, persisted = null, explicit = 30071,
+                occupied = emptySet(), reserved = setOf(30071))
+        }
+    }
+
+    @Test
+    fun managedProcessIdentityPersistsAndSameOwnerMayChangeMode() {
+        val base = Files.createTempDirectory("registry-managed")
+        val layout = RuntimeLayout(base)
+        val store = RegistryStore(layout)
+        val identity = io.github.developmentnetwork.runtime.model.ProcessIdentity(
+            pid = 1234,
+            startInstant = java.time.Instant.parse("2026-08-28T12:00:00Z"),
+            executable = base.resolve("java"),
+            workingDirectory = base.resolve("server"),
+        )
+        val managed = BackendRegistration(
+            BackendName("managed"), 30070, "owner", OwnershipMode.MANAGED, identity,
+        )
+
+        store.register(managed)
+        assertEquals(managed, store.readRegistration("managed"))
+
+        store.register(managed.copy(mode = OwnershipMode.EXTERNAL, process = null))
+
+        assertEquals(OwnershipMode.EXTERNAL, store.readRegistration("managed")?.mode)
+        assertNull(store.readRegistration("managed")?.process)
+        assertTrue(Files.notExists(layout.backend("managed").pid))
+    }
+
+    @Test
+    fun registrationsRejectDuplicatePortAndSecondOwnerCannotReplaceName() {
+        val base = Files.createTempDirectory("registry-transitions")
+        val store = RegistryStore(RuntimeLayout(base))
+        val alpha = BackendRegistration(
+            BackendName("alpha"), 30067, "owner-a", OwnershipMode.MANAGED,
+            process = null,
+        )
+        store.register(alpha)
+
+        assertFailsWith<IllegalStateException> {
+            store.register(alpha.copy(owner = "owner-b"))
+        }
+        assertFailsWith<IllegalStateException> {
+            store.register(
+                BackendRegistration(BackendName("bravo"), 30067, "owner-b", OwnershipMode.EXTERNAL, null)
+            )
+        }
+        assertEquals(alpha, store.readRegistration(BackendName("alpha")))
+    }
+
+    @Test
+    fun anExistingNameWithoutOwnerMetadataCannotBeClaimed() {
+        val base = Files.createTempDirectory("registry-orphan")
+        val store = RegistryStore(RuntimeLayout(base))
+        store.writeNames(listOf(BackendName("orphan")))
+
+        assertFailsWith<IllegalStateException> {
+            store.register(
+                BackendRegistration(BackendName("orphan"), 30070, "owner", OwnershipMode.MANAGED, null),
+            )
+        }
+    }
+
+    @Test
+    fun externalRegistrationsNeverPersistProcessIdentity() {
+        val base = Files.createTempDirectory("registry-external")
+        val store = RegistryStore(RuntimeLayout(base))
+        val registration = BackendRegistration(
+            BackendName("external"), 30070, "external-owner", OwnershipMode.EXTERNAL,
+            process = null,
+        )
+
+        store.register(registration)
+
+        val loaded = store.readRegistration(BackendName("external"))
+        assertEquals(OwnershipMode.EXTERNAL, loaded?.mode)
+        assertNull(loaded?.process)
+        assertTrue(Files.notExists(RuntimeLayout(base).backend(BackendName("external")).pid))
+    }
+}

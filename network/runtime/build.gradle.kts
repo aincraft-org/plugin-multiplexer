@@ -16,6 +16,10 @@ repositories {
 }
 
 dependencies {
+    testImplementation(kotlin("test"))
+    testImplementation(kotlin("test-junit5"))
+    testImplementation("org.junit.jupiter:junit-jupiter:5.13.4")
+    testRuntimeOnly("org.junit.platform:junit-platform-launcher")
     implementation(kotlin("stdlib"))
 }
 
@@ -33,6 +37,9 @@ tasks.withType<KotlinCompile>().configureEach {
 
 application {
     mainClass.set("io.github.developmentnetwork.runtime.RuntimeMainKt")
+}
+tasks.test {
+    useJUnitPlatform()
 }
 
 tasks.named<Jar>("jar") {
