@@ -104,6 +104,23 @@ Existing `-P` properties remain the configuration API:
 | `networkLobbyMapUrl` / `networkLobbyMapSha256` | Static map mode; both are required together. |
 | `networkLobbyMapRandomUrl` | Random map mode; mutually exclusive with static mode. |
 
+Configure a static lobby map on the infrastructure task with its exact checksum:
+
+```text
+./gradlew runProxy \
+  -PnetworkLobbyMapUrl=https://maps.example.invalid/lobby.zip \
+  -PnetworkLobbyMapSha256=<sha256>
+```
+
+For a one-time random map selection, use the mutually exclusive random-map property:
+
+```text
+./gradlew runProxy \
+  -PnetworkLobbyMapRandomUrl=https://maps.example.invalid/random.zip
+```
+
+Replace the example URLs and checksum with the map source selected for the development network.
+
 Backend names must match `[A-Za-z0-9_-]+`. The proxy defaults to port `25565`, the lobby to `30066`, and sorted backend defaults start at `30067`. Persisted `<name>.port` values remain authoritative; managed automatic allocation skips occupied and reserved sockets. `networkBackendPort` is explicit for external registration.
 
 ## Ownership and safety

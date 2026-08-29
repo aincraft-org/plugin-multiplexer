@@ -40,3 +40,15 @@ No formatters, linters, ShellCheck, or project-wide/full-suite checks were run.
 - `git diff --check` passed.
 - The remaining `shellcheck` comments in the Gradle wrapper are implementation comments in the standard wrapper, not CI jobs or the removed shell interface; they are outside Task 7's requested CI/documentation scope.
 - Untracked pre-existing SDD progress/review artifacts and task briefs were left untouched and are not part of this Task 7 change; only this report is added as the requested deliverable.
+
+## Review follow-up
+
+The review identified a missing user-facing invocation linking map properties to a Gradle task. README and SKILL now include static-map and random-map `./gradlew runProxy` examples, and the contract test asserts both forms (including the static checksum property) after normalizing line continuations.
+
+Focused follow-up command:
+
+```text
+./gradlew -p network :test --tests io.github.developmentnetwork.DocumentationContractTest --console=plain
+```
+
+Actual result: `BUILD SUCCESSFUL in 4s` (9 actionable tasks: 3 executed, 6 up-to-date).

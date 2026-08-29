@@ -88,6 +88,23 @@ Long-lived tasks are blocking tasks; registration, unregistration, stop, reload,
 | `networkLobbyMapUrl` and `networkLobbyMapSha256` | Static map mode; both required together. |
 | `networkLobbyMapRandomUrl` | Random map mode; mutually exclusive with static variables. |
 
+Configure a static lobby map on the infrastructure task with its exact checksum:
+
+```text
+./gradlew runProxy \
+  -PnetworkLobbyMapUrl=https://maps.example.invalid/lobby.zip \
+  -PnetworkLobbyMapSha256=<sha256>
+```
+
+For a one-time random map selection, use the mutually exclusive random-map property:
+
+```text
+./gradlew runProxy \
+  -PnetworkLobbyMapRandomUrl=https://maps.example.invalid/random.zip
+```
+
+Replace the example URLs and checksum with the map source selected for the development network.
+
 Backend names match `[A-Za-z0-9_-]+`. The compatibility state remains plain files under the base:
 
 ```text

@@ -78,6 +78,17 @@ class DocumentationContractTest {
         assertTrue(lower.contains("includebuild("), "missing consumer include-build instructions")
         assertTrue(lower.contains("network/"), "include-build must target the network build")
 
+        val normalizedExamples = corpus.replace("\\", "").replace(Regex("\\s+"), " ")
+        assertTrue(
+            normalizedExamples.contains("./gradlew runProxy -PnetworkLobbyMapUrl=") &&
+                normalizedExamples.contains("-PnetworkLobbyMapSha256="),
+            "missing static map Gradle invocation with checksum",
+        )
+        assertTrue(
+            normalizedExamples.contains("./gradlew runProxy -PnetworkLobbyMapRandomUrl="),
+            "missing random map Gradle invocation",
+        )
+
         listOf(
             "runtime.jar",
             "content-addressed",
