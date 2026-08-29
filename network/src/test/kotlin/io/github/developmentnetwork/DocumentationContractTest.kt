@@ -93,12 +93,13 @@ class DocumentationContractTest {
         )
 
         val dedicatedCommands = listOf(
-            "./gradlew runproxy -pnetworkbase=run/dedicated-network -pnetworkproxyport=25565 -pnetworklobbyport=30069",
-            "./gradlew registerbackend -pnetworkbase=run/dedicated-network -pnetworklobbyport=30069 -pnetworkbackend=external-paper -pnetworkbackendport=25566 -pnetworkserverdir=run/external-paper -pnetworkregistrationowner=external-paper-owner",
-            "./gradlew networkstatus -pnetworkbase=run/dedicated-network -pnetworkproxyport=25565 -pnetworklobbyport=30069",
+            "./gradlew runProxy -PnetworkBase=run/dedicated-network -PnetworkProxyPort=25565 -PnetworkLobbyPort=30069",
+            "./gradlew registerBackend -PnetworkBase=run/dedicated-network -PnetworkLobbyPort=30069 -PnetworkBackend=external-paper -PnetworkBackendPort=25566 -PnetworkServerDir=run/external-paper -PnetworkRegistrationOwner=external-paper-owner",
+            "./gradlew networkStatus -PnetworkBase=run/dedicated-network -PnetworkProxyPort=25565 -PnetworkLobbyPort=30069",
         )
         docs.forEach { (name, path) ->
-            val document = path.readText().replace("\\", "").replace(Regex("\\s+"), " ").lowercase()
+            val document = path.readText().replace("\\", "").replace(Regex("\\s+"), " ")
+            val lowerDocument = document.lowercase()
             val commandPositions = dedicatedCommands.map { document.indexOf(it) }
             assertTrue(
                 commandPositions.all { it >= 0 } && commandPositions.zipWithNext().all { (first, second) -> first < second },
@@ -120,7 +121,7 @@ class DocumentationContractTest {
                 "./gradlew clean check",
                 "./gradlew assemble",
             ).forEach { phrase ->
-                assertTrue(document.contains(phrase), "$name missing documentation contract: $phrase")
+                assertTrue(lowerDocument.contains(phrase), "$name missing documentation contract: $phrase")
             }
         }
 
