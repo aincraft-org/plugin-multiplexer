@@ -105,6 +105,7 @@ With an already-running external Paper server listening on backend port `25566`,
 
 ```text
 ./gradlew registerBackend \
+  -PnetworkBase=run/dedicated-network \
   -PnetworkLobbyPort=30069 \
   -PnetworkBackend=external-paper \
   -PnetworkBackendPort=25566 \

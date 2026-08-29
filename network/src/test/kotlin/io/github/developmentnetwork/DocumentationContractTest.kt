@@ -11,9 +11,12 @@ class DocumentationContractTest {
     @Test
     fun `documentation describes the Gradle runtime contract without shell harness references`() {
         val root = Path.of("..").toAbsolutePath().normalize()
+        val docs = listOf(
+            "README.md" to root.resolve("README.md"),
+            "SKILL.md" to root.resolve("SKILL.md"),
+        )
         val files = buildList {
-            add(root.resolve("README.md"))
-            add(root.resolve("SKILL.md"))
+            docs.forEach { (_, path) -> add(path) }
             root.resolve("AGENTS.md").takeIf { it.exists() }?.let(::add)
             val workflows = root.resolve(".github/workflows")
             if (Files.isDirectory(workflows)) {
@@ -88,6 +91,38 @@ class DocumentationContractTest {
             normalizedExamples.contains("./gradlew runProxy -PnetworkLobbyMapRandomUrl="),
             "missing random map Gradle invocation",
         )
+
+        val dedicatedCommands = listOf(
+            "./gradlew runproxy -pnetworkbase=run/dedicated-network -pnetworkproxyport=25565 -pnetworklobbyport=30069",
+            "./gradlew registerbackend -pnetworkbase=run/dedicated-network -pnetworklobbyport=30069 -pnetworkbackend=external-paper -pnetworkbackendport=25566 -pnetworkserverdir=run/external-paper -pnetworkregistrationowner=external-paper-owner",
+            "./gradlew networkstatus -pnetworkbase=run/dedicated-network -pnetworkproxyport=25565 -pnetworklobbyport=30069",
+        )
+        docs.forEach { (name, path) ->
+            val document = path.readText().replace("\\", "").replace(Regex("\\s+"), " ").lowercase()
+            val commandPositions = dedicatedCommands.map { document.indexOf(it) }
+            assertTrue(
+                commandPositions.all { it >= 0 } && commandPositions.zipWithNext().all { (first, second) -> first < second },
+                "$name missing the ordered dedicated shared network sequence",
+            )
+            listOf(
+                "networklobbyport=30069",
+                "networkbackendport=25566",
+                "networkserverdir=run/external-paper",
+                "networkregistrationowner=external-paper-owner",
+                "registration uses the active controller's existing proxy configuration",
+                "requires `networklobbyport` and `networkserverdir`",
+                "never edits or stops paper",
+                "does not prove client routing",
+                "connect a client",
+                "/server external-paper",
+                "clean github actions checkout",
+                "java 25 and the committed gradle wrapper",
+                "./gradlew clean check",
+                "./gradlew assemble",
+            ).forEach { phrase ->
+                assertTrue(document.contains(phrase), "$name missing documentation contract: $phrase")
+            }
+        }
 
         listOf(
             "runtime.jar",
