@@ -236,8 +236,7 @@ For map modes, the destination protocol is: create `world` atomically with POSIX
 
 - Added `NoReplaceDirectoryPublisher`, a reflective JDK Foreign Function & Memory adapter for Linux `renameat2(RENAME_NOREPLACE)`. The adapter supports only the Linux default file-system provider, requires the JDK Foreign Function & Memory API and native access, probes both successful publication and refusal to replace an existing directory, and fails closed for every unsupported OS, provider, runtime, missing symbol, or disabled capability. There is no shell/native helper process, `REPLACE_EXISTING`, provider-level atomic-move fallback, or copy fallback.
 - Lobby publication now performs the final destination check and invokes the kernel no-replace directory publication directly from the fully validated sibling extraction. The public `world` path is absent until the complete map appears atomically; a populated, empty, or delete/recreated creator target wins the no-replace race and is preserved.
-- Capability-probe cleanup is non-recursive over the known direct probe paths, restores mode-000 reservations before deletion, does not follow replacement symlinks, and attaches cleanup failures as suppressed exceptions so the unsupported-capability error remains primary.
-
+- Capability-probe cleanup deletes only the known direct empty probe paths, never traverses a replacement symlink, and attaches cleanup failures as suppressed exceptions so the unsupported-capability error remains primary. It does not chmod a path after a separate symlink check.
 ### Runtime capability
 
 - The supported normal path is the repository's Java 21 runtime on Linux with `--enable-preview` and `--enable-native-access=ALL-UNNAMED`; the Gradle test/application tasks and runtime JAR manifest carry these settings. Java 21's `Arena.allocateUtf8String` and newer JDKs' `Arena.allocateFrom` are handled reflectively. Linux providers without `renameat2` or a JDK FFM implementation fail closed.
@@ -267,3 +266,36 @@ No formatter, linter, project-wide build, or project-wide test command was run.
 
 - Safe publication is intentionally Linux-only and depends on the kernel `renameat2` syscall exposed through libc/JDK FFM; other OSes and providers fail closed rather than weakening the immutable-world contract. The runtime must retain the configured preview/native-access capability.
 - The installer guarantees no replacement by its publication operation, but a separate privileged same-user actor can still delete a world after it has been published; that actor is outside the installer lifecycle contract.
+
+## Fix Round 5 (final review-fix round)
+
+### Implementation
+
+- Changed `NoReplaceDirectoryPublisher` probe cleanup to delete only the known direct probe children and the probe directory itself. The probe creates empty directories, so deletion uses parent-directory permissions and does not need to chmod a child. A replacement symlink is unlinked as a symlink rather than traversed; cleanup remains non-recursive.
+- Kept cleanup failures aggregated and suppressed onto the primary capability error, while still surfacing cleanup failure when no primary error exists.
+- Strengthened `unsupportedProviderFailsClosedBeforeDownloading` with a local `HttpServer` fixture and request counter. The test captures the installation failure, asserts the counter is zero, and only then asserts that the failure is an `IOException` from ZipFS provider rejection.
+
+### Tests
+
+Focused command after the fixes:
+
+```text
+./gradlew -p network :runtime:test --rerun-tasks --tests '*ConfigurationSafetyTest' --tests '*ArtifactSafetyTest' --tests '*LobbyMapInstallerTest' --tests '*MinecraftStatusProbeTest'
+```
+
+Result:
+
+```text
+BUILD SUCCESSFUL in 2s
+4 actionable tasks: 4 executed
+```
+
+### Rationale
+
+Deleting an empty known probe directory is safe even when its mode is `000`, because the parent directory controls removal. Removing the path-based permission mutation closes the symlink replacement window between an `NOFOLLOW_LINKS` check and `setPosixFilePermissions`. The local endpoint makes the pre-download ordering observable: moving provider rejection after the fetch would increment the counter and fail the test before the exception-type assertion.
+
+### Findings status
+
+- Round-5 finding 1: fixed. Probe cleanup no longer chmods a path after a separate symlink check; direct deletion is non-recursive and cleanup errors preserve the primary capability error.
+- Round-5 finding 2: fixed. Unsupported ZipFS providers are verified to make zero HTTP requests before the expected `IOException` assertion.
+- The Linux/default-provider `renameat2(RENAME_NOREPLACE)` implementation, no fallback policy, absent-world publication, provider/path checks, and race tests remain unchanged.

@@ -322,18 +322,26 @@ class LobbyMapInstallerTest {
 
     @Test
     fun unsupportedProviderFailsClosedBeforeDownloading() {
-        val archive = Files.createTempFile("unsupported-map", ".zip")
-        Files.delete(archive)
-        FileSystems.newFileSystem(URI("jar:${archive.toUri()}"), mapOf("create" to "true")).use { fileSystem ->
-            val work = fileSystem.getPath("/work")
-            assertFailsWith<IOException> {
-                LobbyMapInstaller(ArtifactFetcher()).install(
-                    work,
-                    LobbyMapOptions(randomUrl = URI("http://127.0.0.1:1/map")),
+        serve(zip(mapOf("level.dat" to "unused"))).use { fixture ->
+            val archive = Files.createTempFile("unsupported-map", ".zip")
+            Files.delete(archive)
+            FileSystems.newFileSystem(URI("jar:${archive.toUri()}"), mapOf("create" to "true")).use { fileSystem ->
+                val work = fileSystem.getPath("/work")
+                val failure = runCatching {
+                    LobbyMapInstaller(ArtifactFetcher()).install(
+                        work,
+                        LobbyMapOptions(randomUrl = fixture.url),
+                    )
+                }.exceptionOrNull()
+
+                assertEquals(0, fixture.requests.get())
+                assertTrue(
+                    failure is IOException,
+                    "Expected ZipFS provider rejection, got ${failure?.javaClass?.name}: $failure",
                 )
             }
+            Files.deleteIfExists(archive)
         }
-        Files.deleteIfExists(archive)
     }
 
     private fun assertNoTemporaryWorldArtifacts(work: java.nio.file.Path) {
@@ -361,19 +369,26 @@ class LobbyMapInstallerTest {
     }
 
     private data class EntrySpec(val name: String, val content: String, val attrs: Long = 0L)
-    private data class Fixture(val server: HttpServer, val url: URI, val sha256: String) : AutoCloseable {
+    private data class Fixture(
+        val server: HttpServer,
+        val url: URI,
+        val sha256: String,
+        val requests: java.util.concurrent.atomic.AtomicInteger,
+    ) : AutoCloseable {
         override fun close() = server.stop(0)
     }
 
     private fun serve(bytes: ByteArray): Fixture {
+        val requests = java.util.concurrent.atomic.AtomicInteger()
         val server = HttpServer.create(InetSocketAddress(0), 0)
         server.createContext("/map") { exchange ->
+            requests.incrementAndGet()
             exchange.sendResponseHeaders(200, bytes.size.toLong())
             exchange.responseBody.use { it.write(bytes) }
         }
         server.start()
         val sha = java.security.MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
-        return Fixture(server, URI("http://127.0.0.1:${server.address.port}/map"), sha)
+        return Fixture(server, URI("http://127.0.0.1:${server.address.port}/map"), sha, requests)
     }
 
     private fun zip(entries: Map<String, String>): ByteArray = zipEntries(entries.map { EntrySpec(it.key, it.value) })

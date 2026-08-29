@@ -94,9 +94,10 @@ internal object NoReplaceDirectoryPublisher {
 
         /**
          * Exercise both successful publication and refusal to replace an
-         * inaccessible existing directory. Cleanup uses only known paths and
-         * restores permissions before removal, so a probe failure cannot leave
-         * a mode-000 target or replace the primary unsupported-capability error.
+         * inaccessible existing directory. Cleanup deletes only the known
+         * empty probe children directly; it never chmods a path after a
+         * separate symlink check, so cleanup cannot redirect permissions to
+         * an external target.
          */
         fun probe(workDir: Path) {
             val probe = Files.createTempDirectory(workDir, PROBE_PREFIX)
@@ -134,11 +135,11 @@ internal object NoReplaceDirectoryPublisher {
 
     private fun cleanupProbe(probe: Path, paths: List<Path>, primary: Throwable?) {
         var cleanupFailure: Throwable? = null
-        // These are all direct, known probe children. Do not traverse a
-        // provider-owned mode-000 directory while trying to clean it up.
+        // These are all direct, known probe children. Deleting an empty
+        // directory requires permissions on its parent, not on the child.
+        // A replacement symlink is also deleted as a link, never traversed.
         paths.asReversed().forEach { path ->
             try {
-                makeRemovable(path)
                 Files.deleteIfExists(path)
             } catch (error: Throwable) {
                 cleanupFailure = cleanupFailure?.also { it.addSuppressed(error) } ?: error
@@ -156,13 +157,6 @@ internal object NoReplaceDirectoryPublisher {
                 throw cleanupFailure
             }
         }
-    }
-
-    private fun makeRemovable(path: Path) {
-        // Cleanup is deliberately non-recursive and never follows a
-        // replacement symlink. The probe creates only empty directories.
-        if (Files.isSymbolicLink(path) || !Files.isDirectory(path, NOFOLLOW_LINKS)) return
-        Files.setPosixFilePermissions(path, PosixFilePermission.entries.toSet())
     }
 
     private fun unwrap(error: Throwable): Throwable = when (error) {
