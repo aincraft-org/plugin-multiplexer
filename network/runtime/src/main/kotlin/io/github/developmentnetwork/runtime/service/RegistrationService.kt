@@ -106,15 +106,20 @@ class RegistrationService(
 
     private fun effectiveVelocityConfig(requestTarget: String, requestedLobbyPort: Int): VelocityConfig {
         val existing = capture(layout.velocityConfig)?.toString(Charsets.UTF_8)
-        val existingPort = existing?.let { readInt(it, "bind") }
-        val existingTarget = existing?.let { readLobbyTarget(it) }
-        val existingOnline = existing?.let { readBoolean(it, "online-mode") }
-        val existingLobbyPort = existing?.let { readLobbyPort(it) }
+            ?: error("Active proxy configuration is unavailable at ${layout.velocityConfig}")
+        val existingPort = readInt(existing, "bind")
+            ?: error("Active proxy configuration has no valid bind port")
+        val existingTarget = readLobbyTarget(existing)
+            ?: error("Active proxy configuration has no valid lobby target")
+        val existingOnline = readBoolean(existing, "online-mode")
+            ?: error("Active proxy configuration has no valid online-mode setting")
+        val existingLobbyPort = readLobbyPort(existing)
+            ?: error("Active proxy configuration has no valid lobby port")
         return VelocityConfig(
-            proxyPort = existingPort ?: 25565,
-            targetServer = if (requestTarget == "localhost" && existingTarget != null) existingTarget else requestTarget,
-            onlineMode = existingOnline ?: false,
-            lobbyPort = existingLobbyPort ?: requestedLobbyPort,
+            proxyPort = existingPort,
+            targetServer = if (requestTarget == "localhost") existingTarget else requestTarget,
+            onlineMode = existingOnline,
+            lobbyPort = existingLobbyPort,
         )
     }
 
