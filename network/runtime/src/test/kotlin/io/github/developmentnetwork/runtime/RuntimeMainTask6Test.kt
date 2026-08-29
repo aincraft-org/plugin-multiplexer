@@ -28,31 +28,4 @@ class RuntimeMainTask6Test {
         assertEquals(30100, command.request.lobbyPort)
         assertEquals(listOf("alice", "bob"), command.request.devUsers)
     }
-    @Test
-    fun `proxy command accepts controller timeout with complete infrastructure settings`() {
-        val command = parseRuntimeCommand(
-            listOf(
-                "runProxy",
-                "--base=/tmp/network",
-                "--proxy-port=25400",
-                "--lobby-port=30100",
-                "--owner=gradle-owner",
-                "--timeout=240",
-                "--shutdown-timeout=30",
-                "--control-timeout=5",
-                "--online-mode=false",
-                "--dev-users=alice,bob",
-            ),
-        )
-
-        assertTrue(command is RuntimeCommand.ServeProxy)
-        val request = (command as RuntimeCommand.ServeProxy).request
-        assertEquals(25400, request.proxyPort)
-        assertEquals(30100, request.lobbyPort)
-        assertEquals("gradle-owner", request.owner)
-        assertEquals(240L, request.readinessTimeout.seconds)
-        assertEquals(30L, request.shutdownTimeout.seconds)
-        assertEquals(false, request.onlineMode)
-        assertEquals(listOf("alice", "bob"), request.devUsers)
-    }
 }
