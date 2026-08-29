@@ -95,6 +95,25 @@ class ConfigurationSafetyTest {
 
         assertTrue(result.success, result.message)
     }
+    @Test
+    fun paperPreflightRejectsMalformedNonSequenceYamlLine() {
+        val work = Files.createTempDirectory("preflight-malformed-yaml")
+        Files.writeString(work.resolve("server.properties"), "online-mode=false\n")
+        Files.createDirectories(work.resolve("config"))
+        Files.writeString(
+            work.resolve("config/paper-global.yml"),
+            """
+            proxies:
+              velocity
+            """.trimIndent() + "\n",
+        )
+
+        val result = OfflinePreflight().verifyPaper(work)
+
+        assertFalse(result.success)
+        assertContains(result.message, "must use key: value")
+    }
+
 
     @Test
     fun paperWriterUsesOfflineModernForwardingAndDisablesBungee() {

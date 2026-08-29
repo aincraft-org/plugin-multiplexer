@@ -181,6 +181,7 @@ class OfflinePreflight {
             if (trimmed == "-" || trimmed.startsWith("- ")) return@forEachIndexed
             val indent = rawLine.indexOfFirst { !it.isWhitespace() }
             val separator = trimmed.indexOf(':')
+            require(separator > 0) { "line ${index + 1} must use key: value" }
             val key = trimmed.substring(0, separator).trim()
             require(YAML_KEY.matches(key)) { "line ${index + 1} has invalid YAML key" }
             while (stack.isNotEmpty() && stack.last().indent >= indent) stack.removeAt(stack.lastIndex)
