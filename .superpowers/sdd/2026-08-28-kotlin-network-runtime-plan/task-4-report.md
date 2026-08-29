@@ -108,3 +108,28 @@ No formatter, linter, full suite, or project-wide build was run.
 ## Round-2 Findings Status and Residual Risks
 
 All seven round-1 findings are addressed with production changes and deterministic focused fixtures. The control probe's refusal-text check is intentionally conservative for Java 21 portability: platform-specific refusal messages authorize stale cleanup, while timeout, permission, interruption, resource, and unknown outcomes fail closed. As with round 1, Java NIO cannot provide an atomic no-follow Unix-domain connect; path and file-key checks narrow but cannot eliminate the final syscall race. Linux `/proc/<pid>/cwd` remains required for cwd-bearing leases because Java has no portable cwd API.
+
+## Review Round 3
+
+Implemented all round-3 process-supervision review fixes:
+
+- Root-death completion is now gated by an explicit final, complete descendant-discovery observation and an owned root signal. A root that exits before ownership can be revalidated, including one with a reparented child, returns `NOT_OWNED`/`NOT_TERMINATED` rather than optimistic success.
+- Discovery uncertainty is sticky for the complete termination attempt. Root descendant enumeration failures and first-time descendant identity-capture failures permanently disable completion, even when a later refresh succeeds and the current `unknown` map becomes empty. Previously captured descendant leases remain available for identity-gated death/reuse checks without treating transient exit metadata loss as a new discovery failure.
+- Process-handle lookup now distinguishes an empty `ProcessHandle.of` result (`DEAD`) from thrown lookup failures (`UNKNOWN`); unknown lookups fail closed in `treeIsDead`.
+- Root identity is rechecked immediately before tree observations and every discovery/signal transition. Post-signal root-loss observation is bounded and can only complete after the final discovery gate passes.
+
+## Round-3 Regression Evidence
+
+Focused command:
+
+```text
+./gradlew -p network :runtime:test --tests '*ProcessSupervisorTest' --tests '*ControlChannelTest'
+```
+
+Result: `BUILD SUCCESSFUL`; 29 focused tests completed with zero failures or errors, including deterministic reparented-child root death, sticky one-time discovery failure followed by a successful refresh, thrown process-handle lookup uncertainty, and non-terminated outcomes with child/root cleanup.
+
+No formatter, linter, full suite, or project-wide build was run.
+
+## Round-3 Findings Status and Residual Risks
+
+All four round-3 findings are addressed in production logic and focused tests. Graceful/forced success requires an owned root signal, a complete final discovery state, and dead observations for all tracked/unknown identities; spontaneous root loss and indeterminate discovery remain non-success outcomes. Existing interrupt, identity, direct-launch, stdin, readiness, frame-bound, listener-capacity, and stale-socket safety fixes remain unchanged. As before, Java's process APIs cannot provide an atomic no-follow tree snapshot or eliminate the final race between a validated descendant observation and a child spawn/reparent event; the implementation fails closed whenever that race is observable as root loss or lookup/discovery uncertainty.

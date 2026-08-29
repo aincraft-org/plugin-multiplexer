@@ -194,6 +194,92 @@ class ProcessSupervisorTest {
             child?.destroyForcibly()
         }
     }
+
+    @Test
+    fun rootDeathWithReparentedLateChildCannotClaimTermination() {
+        val work = Files.createTempDirectory("process-supervisor-reparented-child")
+        val marker = work.resolve("marker")
+        val supervisor = ProcessSupervisor()
+        val owned = supervisor.launch(fixtureCommand(marker, "spawn-exit"), work)
+        var child: ProcessHandle? = null
+        try {
+            awaitMarker(marker.resolveSibling("marker.child"))
+            val childPid = Files.readString(marker.resolveSibling("marker.child.pid")).trim().toLong()
+            child = ProcessHandle.of(childPid).orElseThrow()
+            assertTrue(child.isAlive)
+            owned.process.onExit().get()
+
+            assertEquals(
+                ProcessSupervisor.TerminationResult.NOT_OWNED,
+                supervisor.terminate(owned, Duration.ofMillis(150)),
+            )
+            assertTrue(child.isAlive)
+        } finally {
+            child?.destroyForcibly()
+            child?.let { runCatching { it.onExit().get() } }
+            owned.process.destroyForcibly()
+            runCatching { owned.process.waitFor() }
+        }
+    }
+
+    @Test
+    fun discoveryFailureRemainsIndeterminateAfterLaterRefreshSucceeds() {
+        val work = Files.createTempDirectory("process-supervisor-sticky-discovery")
+        val marker = work.resolve("marker")
+        val supervisor = ProcessSupervisor(FailOnceDescendantReader())
+        val owned = supervisor.launch(fixtureCommand(marker, "spawn-block"), work)
+        var child: ProcessHandle? = null
+        try {
+            awaitMarker(marker.resolveSibling("marker.child"))
+            awaitMarkerContent(marker, "ready")
+            val childPid = Files.readString(marker.resolveSibling("marker.child.pid")).trim().toLong()
+            child = ProcessHandle.of(childPid).orElseThrow()
+            assertTrue(child.isAlive)
+            assertEquals(
+                ProcessSupervisor.TerminationResult.NOT_TERMINATED,
+                supervisor.terminate(owned, Duration.ZERO),
+            )
+            assertFalse(owned.process.isAlive)
+            assertFalse(child.isAlive)
+        } finally {
+            child?.destroyForcibly()
+            child?.let { runCatching { it.onExit().get() } }
+            owned.process.destroyForcibly()
+            runCatching { owned.process.waitFor() }
+        }
+    }
+
+    @Test
+    fun thrownProcessHandleLookupIsUnknownAndCannotClaimTermination() {
+        val work = Files.createTempDirectory("process-supervisor-lookup-unknown")
+        val marker = work.resolve("marker")
+        var unknownPid: Long? = null
+        val supervisor = ProcessSupervisor(PermissiveIdentityReader()) { pid ->
+            if (pid == unknownPid) throw SecurityException("synthetic lookup failure")
+            ProcessHandle.of(pid)
+        }
+        val owned = supervisor.launch(fixtureCommand(marker, "spawn-block"), work)
+        var child: ProcessHandle? = null
+        try {
+            awaitMarker(marker.resolveSibling("marker.child"))
+            awaitMarkerContent(marker, "ready")
+            val childPid = Files.readString(marker.resolveSibling("marker.child.pid")).trim().toLong()
+            unknownPid = childPid
+            child = ProcessHandle.of(childPid).orElseThrow()
+            assertEquals(
+                ProcessSupervisor.TerminationResult.NOT_TERMINATED,
+                supervisor.terminate(owned, Duration.ZERO),
+            )
+            assertFalse(owned.process.isAlive)
+            assertFalse(child.isAlive)
+        } finally {
+            child?.destroyForcibly()
+            child?.let { runCatching { it.onExit().get() } }
+            owned.process.destroyForcibly()
+            runCatching { owned.process.waitFor() }
+        }
+    }
+
     @Test
     fun forceEscalationReportsOnlyAfterRootDeath() {
         val work = Files.createTempDirectory("process-supervisor-force")
@@ -455,6 +541,23 @@ private class FailingDescendantReader : io.github.developmentnetwork.runtime.pro
     }
 }
 
+private class FailOnceDescendantReader : io.github.developmentnetwork.runtime.process.ProcessIdentityReader() {
+    private var failed = false
+
+    override fun matches(identity: ProcessIdentity): Boolean = true
+
+    override fun matches(handle: ProcessHandle, identity: ProcessIdentity): Boolean = true
+
+    override fun captureDescendant(handle: ProcessHandle, fallbackCwd: Path): ProcessIdentity {
+        if (!failed) {
+            failed = true
+            throw IllegalStateException("synthetic one-time descendant metadata failure")
+        }
+        return super.captureDescendant(handle, fallbackCwd)
+    }
+}
+
+
 private class ForceRefusingIdentityReader : io.github.developmentnetwork.runtime.process.ProcessIdentityReader() {
     private var rootPid: Long? = null
 
@@ -477,8 +580,9 @@ object ProcessFixture {
             Files.writeString(marker, line)
             return
         }
-        if (mode == "spawn" || mode == "spawn-block") {
+        if (mode == "spawn" || mode == "spawn-block" || mode == "spawn-exit") {
             val childMarker = marker.resolveSibling("${marker.fileName}.child")
+
             val child = ProcessBuilder(
                 Path.of(System.getProperty("java.home"), "bin", "java").toString(),
                 "-cp",
@@ -489,6 +593,8 @@ object ProcessFixture {
             ).directory(marker.parent.toFile()).start()
             Files.writeString(marker.resolveSibling("${marker.fileName}.child.pid"), "${child.pid()}\n")
         }
+        if (mode == "spawn-exit") return
+
         if (mode == "block" || mode == "spawn-block") {
             @Suppress("UNCHECKED_CAST")
             sun.misc.Signal.handle(sun.misc.Signal("TERM"), sun.misc.SignalHandler {
