@@ -20,7 +20,7 @@
 - Persisted port wins over explicit port, explicit port wins over sorted default; managed automatic allocation skips occupied and reserved ports; names match `[A-Za-z0-9_-]+`.
 - `proxy.lock` covers the infrastructure controller lifetime; `register.lock` serializes registry, ownership, port, config, and reload mutations; artifact downloads use per-destination locks and atomic same-directory replacement.
 - Require independent offline-mode and modern-forwarding preflight for proxy, lobby, and every backend; Paper uses `online-mode=false` and `spigot.yml` `settings.bungeecord: false`.
-- Preserve Velocity 4.1.1 build 24 SHA-256 `846411d2d0560fed0f23496ffb89681be528d2c0650ecdcf21724d2d7bd9c1ee` and Paper 26.2 build 119 SHA-256 `a8c9140c3075bd7c04973e9cdc491b21fbe6bad472b674ef932a4ae0fec19629`.
+- Preserve Velocity 4.1.1 build 24 SHA-256 `846411d2d0560fed0f23496ffb89681be528d2c0650ecdcf21724d2d7bd9c1ee` and Paper 26.2 build 119 SHA-256 `a8c9140c3075bd7c04973e9cdc491b21bfe6bad472b674ef932a4ae0fec19629`.
 - Pinned downloads require existing-file verification, streaming SHA-256, same-directory temporary files, atomic rename, and cleanup after failure.
 - Lobby ZIP validation must reject absolute paths, traversal, backslashes, duplicates, symlinks, special file types, malformed archives, and invalid world roots before extraction; existing `world/level.dat` is immutable.
 - Managed ops use Java `UUID.nameUUIDFromBytes("OfflinePlayer:" + name)` at level 4; external servers never receive ops.

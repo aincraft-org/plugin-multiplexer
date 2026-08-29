@@ -1,6 +1,7 @@
 package io.github.developmentnetwork.runtime
 
 import io.github.developmentnetwork.runtime.controller.RuntimeArtifactProvider
+import io.github.developmentnetwork.runtime.controller.PinnedRuntimeArtifactProvider
 import io.github.developmentnetwork.runtime.controller.InfrastructureController
 import io.github.developmentnetwork.runtime.controller.InfrastructureMode
 import io.github.developmentnetwork.runtime.controller.InfrastructureRequest
@@ -30,6 +31,16 @@ import kotlin.test.assertTrue
 
 /** Integration fixtures exercise controller ownership without downloading Minecraft artifacts. */
 class ControllerLifecycleTest {
+
+    @Test
+    fun pinnedPaperArtifactUsesCanonicalVersionBuildAndChecksum() {
+        assertEquals("26.2", PinnedRuntimeArtifactProvider.PAPER_VERSION)
+        assertEquals("119", PinnedRuntimeArtifactProvider.PAPER_BUILD)
+        assertEquals(
+            "a8c9140c3075bd7c04973e9cdc491b21bfe6bad472b674ef932a4ae0fec19629",
+            PinnedRuntimeArtifactProvider.PAPER_SHA256,
+        )
+    }
     @Test
     fun proxyLockExcludesSecondControllerAndProxyOnlyDoesNotStartRegisteredBackend() {
         val base = Files.createTempDirectory("runtime-controller-lock")

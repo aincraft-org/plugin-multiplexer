@@ -64,7 +64,7 @@ class PinnedRuntimeArtifactProvider(private val fetcher: ArtifactFetcher = Artif
         const val VELOCITY_SHA256 = "846411d2d0560fed0f23496ffb89681be528d2c0650ecdcf21724d2d7bd9c1ee"
         const val PAPER_VERSION = "26.2"
         const val PAPER_BUILD = "119"
-        const val PAPER_SHA256 = "a8c9140c3075bd7c04973e9cdc491b21fbe6bad472b674ef932a4ae0fec19629"
+        const val PAPER_SHA256 = "a8c9140c3075bd7c04973e9cdc491b21bfe6bad472b674ef932a4ae0fec19629"
     }
 }
 data class InfrastructureRequest(
