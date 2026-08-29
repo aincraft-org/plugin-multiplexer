@@ -64,7 +64,7 @@ class RegistrationService(
             var generatedConfig: ByteArray? = null
             try {
                 registry.withRegistrationTransition {
-                    val config = effectiveVelocityConfig(request.targetServer, request.lobbyPort)
+                    val config = effectiveVelocityConfig(request.targetServer)
                     require(request.port != config.proxyPort && request.port != config.lobbyPort) {
                         "External backend port ${request.port} collides with the active proxy/lobby port"
                     }
@@ -104,7 +104,7 @@ class RegistrationService(
         require(response.ok) { response.message.ifBlank { "proxy reload was rejected" } }
     }
 
-    private fun effectiveVelocityConfig(requestTarget: String, requestedLobbyPort: Int): VelocityConfig {
+    private fun effectiveVelocityConfig(requestTarget: String): VelocityConfig {
         val existing = capture(layout.velocityConfig)?.toString(Charsets.UTF_8)
             ?: error("Active proxy configuration is unavailable at ${layout.velocityConfig}")
         val existingPort = readInt(existing, "bind")
@@ -157,19 +157,19 @@ class RegistrationService(
     }
 
     private fun readInt(content: String, key: String): Int? =
-        Regex("^$key\\s*=\\s*\\\"[^:]+:(\\d+)\\\"", RegexOption.MULTILINE)
+        Regex("^$key[ \\t]*=[ \\t]*\\\"[^:\\r\\n]+:(\\d+)\\\"[ \\t]*$", RegexOption.MULTILINE)
             .find(content)?.groupValues?.get(1)?.toIntOrNull()
 
     private fun readBoolean(content: String, key: String): Boolean? =
-        Regex("^$key\\s*=\\s*(true|false)\\s*$", RegexOption.MULTILINE)
+        Regex("^$key[ \\t]*=[ \\t]*(true|false)[ \\t]*$", RegexOption.MULTILINE)
             .find(content)?.groupValues?.get(1)?.toBooleanStrictOrNull()
 
     private fun readLobbyTarget(content: String): String? =
-        Regex("^lobby\\s*=\\s*\\\"([^:]+):\\d+\\\"", RegexOption.MULTILINE)
+        Regex("^lobby[ \\t]*=[ \\t]*\\\"([^:\\r\\n]+):(\\d+)\\\"[ \\t]*$", RegexOption.MULTILINE)
             .find(content)?.groupValues?.get(1)
 
     private fun readLobbyPort(content: String): Int? =
-        Regex("^lobby\\s*=\\s*\\\"[^:]+:(\\d+)\\\"", RegexOption.MULTILINE)
+        Regex("^lobby[ \\t]*=[ \\t]*\\\"[^:\\r\\n]+:(\\d+)\\\"[ \\t]*$", RegexOption.MULTILINE)
             .find(content)?.groupValues?.get(1)?.toIntOrNull()
     private fun fail(error: Exception): Int {
         System.err.println("external registration: ${error.message ?: error::class.simpleName}")

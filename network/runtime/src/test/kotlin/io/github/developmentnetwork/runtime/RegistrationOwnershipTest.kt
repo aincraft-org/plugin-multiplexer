@@ -164,6 +164,66 @@ class RegistrationOwnershipTest {
     }
 
     @Test
+    fun externalRegistrationRejectsMalformedActiveBindBeforeMutation() {
+        val base = Files.createTempDirectory("runtime-registration-malformed-config")
+        val layout = RuntimeLayout(base)
+        val serverDir = base.resolve("external")
+        val proxyReservation = ServerSocket(0)
+        val lobbyReservation = ServerSocket(0)
+        val distractorReservation = ServerSocket(0)
+        val proxyPort = proxyReservation.localPort
+        val lobbyPort = lobbyReservation.localPort
+        val distractorPort = distractorReservation.localPort
+        writePaperConfig(serverDir, proxyPort)
+        val paperMarker = serverDir.resolve("sentinel.txt").also { Files.writeString(it, "untouched") }
+        io.github.developmentnetwork.runtime.config.VelocityConfigWriter().write(
+            layout,
+            io.github.developmentnetwork.runtime.config.VelocityConfig(
+                proxyPort = proxyPort,
+                targetServer = "localhost",
+                onlineMode = false,
+                lobbyPort = lobbyPort,
+            ),
+        )
+        val validVelocity = Files.readString(layout.velocityConfig)
+        val malformedVelocity = validVelocity.replace(
+            "bind = \"0.0.0.0:$proxyPort\"",
+            "bind = \"malformed\"\nprobe = \"localhost:$distractorPort\"",
+        )
+        Files.writeString(layout.velocityConfig, malformedVelocity)
+        val previousVelocity = Files.readAllBytes(layout.velocityConfig)
+        val token = ControlServer.generateToken()
+        val control = ControlServer().serve(layout.proxyControl, token) {
+            io.github.developmentnetwork.runtime.controller.ControlResponse.success("reloaded")
+        }
+        AtomicFiles.write(layout.proxyReady, "ready\n")
+        try {
+            val request = io.github.developmentnetwork.runtime.service.RegisterExternalRequest(
+                name = "external",
+                port = proxyPort,
+                owner = "external-owner",
+                serverDir = serverDir,
+                readinessTimeout = Duration.ofSeconds(1),
+            )
+
+            assertEquals(1, RegistrationService(layout).execute(request))
+        } finally {
+            control.close()
+            proxyReservation.close()
+            lobbyReservation.close()
+            distractorReservation.close()
+        }
+
+        assertEquals(
+            null,
+            io.github.developmentnetwork.runtime.registry.RegistryStore(layout).readRegistration("external"),
+        )
+        assertFalse(Files.exists(layout.backend("external").owner))
+        assertTrue(previousVelocity.contentEquals(Files.readAllBytes(layout.velocityConfig)))
+        assertEquals("untouched", Files.readString(paperMarker))
+    }
+
+    @Test
     fun reloadIsIdempotentAndStopFallbackDoesNotTouchExternalRegistration() {
         val base = Files.createTempDirectory("runtime-services")
         val layout = RuntimeLayout(base)
