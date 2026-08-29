@@ -1,425 +1,119 @@
 package io.github.developmentnetwork
 
-import java.io.File
-import java.net.InetSocketAddress
-import java.net.ServerSocket
-import java.util.concurrent.atomic.AtomicBoolean
-import org.gradle.api.DefaultTask
-import org.gradle.api.GradleException
+import io.github.developmentnetwork.runtime.RuntimeCommand
+import io.github.developmentnetwork.runtime.controller.InfrastructureRequest
+import io.github.developmentnetwork.runtime.controller.ManagedBackendRequest
+import io.github.developmentnetwork.runtime.service.NetworkStatusRequest
+import io.github.developmentnetwork.runtime.service.RegisterExternalRequest
+import io.github.developmentnetwork.runtime.service.ReloadNetworkRequest
+import io.github.developmentnetwork.runtime.service.RestartBackendRequest
+import io.github.developmentnetwork.runtime.service.StopNetworkRequest
+import io.github.developmentnetwork.runtime.service.UnregisterExternalRequest
 import org.gradle.api.Plugin
 import org.gradle.api.Project
-import org.gradle.jvm.tasks.Jar
 import org.gradle.api.tasks.TaskAction
+import org.gradle.work.DisableCachingByDefault
 
-/**
- * Gradle integration for the development network.
- *
- * Shared mode:
- *   runProxy       owns the proxy + lobby controller.
- *   registerBackend attaches an already-running external Paper server.
- *   runBackend     builds and owns this project's managed Paper backend.
- *
- * runNetwork remains a one-project convenience task that starts the full
- * stack. It is intentionally not the coordination primitive for multiple
- * plugin projects sharing a networkBase.
- */
 class DevNetworkPlugin : Plugin<Project> {
     override fun apply(project: Project) {
-        val jarTaskName = project.findProperty("networkJarTask") as String? ?: "jar"
+        val extension = project.extensions.create("developmentNetwork", DevelopmentNetworkExtension::class.java)
+        extension.networkBase.convention(project.providers.gradleProperty("networkBase").map { project.layout.projectDirectory.dir(it) }.orElse(project.layout.projectDirectory.dir("run/network")))
+        extension.networkBackend.convention(project.providers.gradleProperty("networkBackend").orElse(project.name))
+        extension.networkBackendPort.convention(project.providers.gradleProperty("networkBackendPort").map { raw -> raw.toIntOrNull() ?: throw IllegalArgumentException("networkBackendPort '$raw' invalid (use 1024..65535)") })
+        extension.networkProxyPort.convention(project.providers.gradleProperty("networkProxyPort").map { raw -> raw.toIntOrNull() ?: throw IllegalArgumentException("networkProxyPort '$raw' invalid (use 0 or 1024..65535)") }.orElse(25565))
+        extension.networkJarTask.convention(project.providers.gradleProperty("networkJarTask").orElse("jar"))
+        extension.networkDevUsers.convention(project.providers.gradleProperty("networkDevUsers").orElse(project.providers.environmentVariable("DEV_NETWORK_DEV_USERS")).orElse("dev"))
+        extension.networkOnlineMode.convention(project.providers.gradleProperty("networkOnlineMode").map {
+            when (it) { "true" -> true; "false" -> false; else -> throw IllegalArgumentException("networkOnlineMode '$it' invalid (use true or false)") }
+        }.orElse(false))
+        extension.networkRegistrationOwner.convention(project.providers.gradleProperty("networkRegistrationOwner"))
+        extension.networkTargetServer.convention(project.providers.gradleProperty("networkTargetServer").orElse("localhost"))
+        extension.networkLobbyPort.convention(project.providers.gradleProperty("networkLobbyPort").map { raw -> raw.toIntOrNull() ?: throw IllegalArgumentException("networkLobbyPort '$raw' invalid") }.orElse(30066))
+        extension.networkLobbyMapUrl.convention(project.providers.gradleProperty("networkLobbyMapUrl"))
+        extension.networkLobbyMapSha256.convention(project.providers.gradleProperty("networkLobbyMapSha256"))
+        extension.networkLobbyMapRandomUrl.convention(project.providers.gradleProperty("networkLobbyMapRandomUrl"))
+        extension.networkTimeout.convention(project.providers.gradleProperty("networkTimeout").map { raw -> raw.toLongOrNull() ?: throw IllegalArgumentException("networkTimeout '$raw' invalid") }.orElse(240))
+        extension.networkShutdownTimeout.convention(project.providers.gradleProperty("networkShutdownTimeout").map { raw -> raw.toLongOrNull() ?: throw IllegalArgumentException("networkShutdownTimeout '$raw' invalid") }.orElse(30))
+        extension.networkControlTimeout.convention(project.providers.gradleProperty("networkControlTimeout").map { raw -> raw.toLongOrNull() ?: throw IllegalArgumentException("networkControlTimeout '$raw' invalid") }.orElse(5))
+        extension.networkServerDir.convention(project.providers.gradleProperty("networkServerDir"))
 
-        project.tasks.register("runProxy", RunProxyTask::class.java) { task ->
-            task.group = "network"
-            task.description = "Own and run the shared Velocity proxy plus lobby"
-        }
+        register(project, "runProxy", RunProxyTask::class.java, "Own and run the shared Velocity proxy plus lobby")
+        register(project, "registerBackend", RegisterBackendTask::class.java, "Attach an already-running backend (never starts or stops Paper)")
+        register(project, "unregisterBackend", UnregisterBackendTask::class.java, "Remove this project's external backend registration")
+        registerManaged(project, "runBackend", RunBackendTask::class.java, "Build, register, and run this project's managed Paper backend")
+        registerManaged(project, "runNetwork", RunNetworkTask::class.java, "Run a one-project full network (proxy + lobby + backend)")
+        register(project, "stopNetwork", StopNetworkTask::class.java, "Stop the owned network controller and its components")
+        register(project, "reloadNetwork", ReloadNetworkTask::class.java, "Regenerate network configuration and reload the proxy")
+        registerManaged(project, "restartBackend", RestartBackendTask::class.java, "Restart this project's managed Paper backend")
+        register(project, "networkStatus", NetworkStatusTask::class.java, "Probe network endpoints and report their status")
+    }
 
-        project.tasks.register("registerBackend", RegisterBackendTask::class.java) { task ->
-            task.group = "network"
-            task.description = "Attach an already-running backend (never starts or stops Paper)"
-        }
+    private fun <T : org.gradle.api.Task> register(project: Project, name: String, type: Class<T>, description: String) = project.tasks.register(name, type) { it.group = "network"; it.description = description }
+    private fun <T : org.gradle.api.Task> registerManaged(project: Project, name: String, type: Class<T>, description: String) = register(project, name, type, description).also { task -> task.configure { it.dependsOn(extension(project).networkJarTask.map { jar -> project.tasks.named(jar) }) } }
+}
 
-        project.tasks.register("unregisterBackend", UnregisterBackendTask::class.java) { task ->
-            task.group = "network"
-            task.description = "Remove this project's external backend registration"
-        }
+@DisableCachingByDefault(because = "Network tasks start, stop, or mutate external services")
+abstract class RunProxyTask : org.gradle.api.DefaultTask() {
+    @TaskAction fun runProxy() { val e = extension(project); NetworkTaskSupport.run(project, RuntimeCommand.ServeProxy(infrastructure(owner(project, project.name), e)), true) }
+}
 
-        project.tasks.register("runBackend", RunBackendTask::class.java) { task ->
-            task.group = "network"
-            task.description = "Build, register, and run this project's managed Paper backend"
-            task.dependsOn(jarTaskName)
-        }
-
-        project.tasks.register("runNetwork", RunNetworkTask::class.java) { task ->
-            task.group = "network"
-            task.description = "Run a one-project full network (proxy + lobby + backend)"
-            task.dependsOn(jarTaskName)
-        }
+@DisableCachingByDefault(because = "Network tasks mutate shared network registration state")
+abstract class RegisterBackendTask : org.gradle.api.DefaultTask() {
+    @TaskAction fun registerBackend() {
+        val e = extension(project); val name = backendName(project)
+        val backendPort = e.networkBackendPort.orNull ?: throw org.gradle.api.GradleException("registerBackend requires -PnetworkBackendPort=<port>; it attaches an already-running external Paper server")
+        port(backendPort, "networkBackendPort")
+        val serverDir = e.networkServerDir.orNull?.let(project::file) ?: baseDir(project).resolve("runtime/external/$name")
+        NetworkTaskSupport.run(project, RuntimeCommand.RegisterExternal(RegisterExternalRequest(name, backendPort, owner(project, name), serverDir.toPath(), "localhost", e.networkTargetServer.get(), duration(e.networkControlTimeout.get(), "networkControlTimeout"), duration(e.networkTimeout.get(), "networkTimeout"))), false)
     }
 }
 
-abstract class RunProxyTask : DefaultTask() {
-    @TaskAction
-    fun runProxy() {
-        val project = project
-        val base = property(project, "networkBase") ?: "run/network"
-        val proxyPort = resolveProxyPort(project)
-        val harnessBin = harnessBin(project)
+@DisableCachingByDefault(because = "Network tasks mutate shared network registration state")
+abstract class UnregisterBackendTask : org.gradle.api.DefaultTask() {
+    @TaskAction fun unregisterBackend() { val e = extension(project); val name = backendName(project); NetworkTaskSupport.run(project, RuntimeCommand.UnregisterExternal(UnregisterExternalRequest(name, owner(project, name), e.networkTargetServer.get(), duration(e.networkControlTimeout.get(), "networkControlTimeout"))), false) }
+}
 
-        val process = launch(
-            project,
-            listOf(harnessBin.resolve("dev-network.sh").absolutePath),
-            mapOf(
-                "BASE" to project.layout.projectDirectory.dir(base).asFile.absolutePath,
-                "NETWORK_ROLE" to "proxy",
-                "PROXY_PORT" to proxyPort.toString(),
-                "DEV_USERS" to devUsers(project)
-            ) + proxyOnlineModeEnvironment(project),
-            removeInherited = setOf("BACKENDS", "EXTERNAL_BACKENDS")
-        )
-        val exit = waitFor(process, "proxy controller")
-        if (exit != 0 && exit != 130) {
-            throw GradleException("proxy controller exited with code $exit")
-        }
+@DisableCachingByDefault(because = "Network tasks start and own an external Paper process")
+abstract class RunBackendTask : org.gradle.api.DefaultTask() {
+    @TaskAction fun runBackend() {
+        val e = extension(project); val name = backendName(project); val jar = configuredJar(project); val workDir = baseDir(project).resolve("runtime/auto/$name")
+        val requestedPort = e.networkBackendPort.orNull?.let { port(it, "networkBackendPort") }
+        NetworkTaskSupport.run(project, RuntimeCommand.ServeBackend(ManagedBackendRequest(name, managedOwner(project, name), requestedPort, workDir.toPath(), pluginJar = jar.toPath(), readinessTimeout = duration(e.networkTimeout.get(), "networkTimeout"), shutdownTimeout = duration(e.networkShutdownTimeout.get(), "networkShutdownTimeout"), devUsers = users(e))), true)
     }
 }
 
-abstract class RegisterBackendTask : DefaultTask() {
-    @TaskAction
-    fun registerBackend() {
-        val project = project
-        val base = property(project, "networkBase") ?: "run/network"
-        val name = property(project, "networkBackend") ?: project.name
-        check(name.matches(Regex("[A-Za-z0-9_-]+"))) {
-            "networkBackend '$name' invalid (use [A-Za-z0-9_-]+)"
-        }
-        val port = property(project, "networkBackendPort")?.toIntOrNull()
-            ?: throw GradleException(
-                "registerBackend requires -PnetworkBackendPort=<port>; " +
-                    "it attaches an already-running external Paper server"
-            )
-        check(port in 1024..65535) {
-            "networkBackendPort '$port' invalid (use 1024..65535)"
-        }
 
-        val baseDir = project.layout.projectDirectory.dir(base).asFile
-        val harness = harnessBin(project)
-        val ownerId = registrationOwner(project, name)
-        println("== registerBackend: attaching '$name' on port $port (owner $ownerId)")
-
-        val registration = launch(
-            project,
-            listOf(
-                harness.resolve("register-backend.sh").absolutePath,
-                name,
-                port.toString()
-            ),
-            mapOf(
-                "BASE" to baseDir.absolutePath,
-                "REGISTRATION_OWNER" to ownerId
-            ),
-            removeInherited = setOf("BACKENDS", "EXTERNAL_BACKENDS")
-        )
-        val exit = waitFor(registration, "external backend registration")
-        if (exit != 0) {
-            throw GradleException("external backend registration exited with code $exit")
-        }
-        println("== registerBackend: '$name' attached; Paper was not started or stopped")
+@DisableCachingByDefault(because = "Network tasks start and own external services")
+abstract class RunNetworkTask : org.gradle.api.DefaultTask() {
+    @TaskAction fun runNetwork() {
+        val e = extension(project); val name = backendName(project); val jar = configuredJar(project); val workDir = baseDir(project).resolve("runtime/auto/$name")
+        val requestedPort = e.networkBackendPort.orNull?.let { port(it, "networkBackendPort") }
+        val runOwner = managedOwner(project, name)
+        NetworkTaskSupport.run(project, RuntimeCommand.ServeFull(infrastructure(runOwner, e).copy(backendName = name, backendPort = requestedPort, backendOwner = runOwner, backendWorkDir = workDir.toPath(), backendPluginJar = jar.toPath())), true)
     }
 }
 
-abstract class UnregisterBackendTask : DefaultTask() {
-    @TaskAction
-    fun unregisterBackend() {
-        val project = project
-        val base = property(project, "networkBase") ?: "run/network"
-        val name = property(project, "networkBackend") ?: project.name
-        check(name.matches(Regex("[A-Za-z0-9_-]+"))) {
-            "networkBackend '$name' invalid (use [A-Za-z0-9_-]+)"
-        }
-
-        val baseDir = project.layout.projectDirectory.dir(base).asFile
-        val harness = harnessBin(project)
-        val ownerId = registrationOwner(project, name)
-        val unregister = launch(
-            project,
-            listOf(
-                harness.resolve("unregister-backend.sh").absolutePath,
-                name
-            ),
-            mapOf(
-                "BASE" to baseDir.absolutePath,
-                "REGISTRATION_OWNER" to ownerId
-            ),
-            removeInherited = setOf("BACKENDS", "EXTERNAL_BACKENDS")
-        )
-        val exit = waitFor(unregister, "backend unregistration")
-        if (exit != 0) {
-            throw GradleException("backend unregistration exited with code $exit")
-        }
-    }
+@DisableCachingByDefault(because = "Network tasks stop external services")
+abstract class StopNetworkTask : org.gradle.api.DefaultTask() {
+    @TaskAction fun stopNetwork() { val e = extension(project); NetworkTaskSupport.run(project, RuntimeCommand.StopNetwork(StopNetworkRequest(e.networkRegistrationOwner.orNull?.trim()?.takeIf(String::isNotEmpty), duration(e.networkControlTimeout.get(), "networkControlTimeout"), duration(e.networkShutdownTimeout.get(), "networkShutdownTimeout"))), false) }
 }
 
-abstract class RunBackendTask : DefaultTask() {
-    @TaskAction
-    fun runBackend() {
-        val project = project
-        val base = property(project, "networkBase") ?: "run/network"
-        val name = property(project, "networkBackend") ?: project.name
-        check(name.matches(Regex("[A-Za-z0-9_-]+"))) {
-            "networkBackend '$name' invalid (use [A-Za-z0-9_-]+)"
-        }
-
-        val baseDir = project.layout.projectDirectory.dir(base).asFile
-        val harness = harnessBin(project)
-        deployBackendJar(project, baseDir, name)
-        val serverDir = baseDir.resolve("runtime/auto/$name")
-        val ownerId = managedRegistrationOwner(project, name)
-
-        println("== runBackend: backend '$name' -> $serverDir (owner $ownerId)")
-
-        val cleaned = AtomicBoolean(false)
-        val cleanup = {
-            if (cleaned.compareAndSet(false, true)) {
-                try {
-                    val cleanupProcess = launch(
-                        project,
-                        listOf(
-                            harness.resolve("unregister-backend.sh").absolutePath,
-                            name,
-                            "--stop"
-                        ),
-                        mapOf(
-                            "BASE" to baseDir.absolutePath,
-                            "REGISTRATION_OWNER" to ownerId
-                        ),
-                        removeInherited = setOf("BACKENDS", "EXTERNAL_BACKENDS")
-                    )
-                    val cleanupExit = waitFor(cleanupProcess, "managed backend cleanup")
-                    if (cleanupExit != 0) {
-                        println("!! runBackend: cleanup exited with code $cleanupExit")
-                    }
-                } catch (error: Exception) {
-                    println("!! runBackend: cleanup failed: ${error.message}")
-                }
-            }
-        }
-        val shutdownHook = Thread { cleanup() }
-        Runtime.getRuntime().addShutdownHook(shutdownHook)
-
-        try {
-            val registration = launch(
-                project,
-                listOf(
-                    harness.resolve("register-backend.sh").absolutePath,
-                    name,
-                    "",
-                    serverDir.absolutePath
-                ),
-                mapOf(
-                    "BASE" to baseDir.absolutePath,
-                    "DEV_USERS" to devUsers(project),
-                    "REGISTRATION_OWNER" to ownerId
-                ),
-                removeInherited = setOf("BACKENDS", "EXTERNAL_BACKENDS")
-            )
-            val registrationExit = waitFor(registration, "managed backend registration")
-            if (registrationExit != 0) {
-                throw GradleException("managed backend registration exited with code $registrationExit")
-            }
-
-            val pidFile = baseDir.resolve("runtime/$name.pid")
-            val pid = waitForPid(pidFile, name)
-            waitForBackend(pid, name)
-        } finally {
-            cleanup()
-            try {
-                Runtime.getRuntime().removeShutdownHook(shutdownHook)
-            } catch (_: IllegalStateException) {
-                // JVM shutdown is already in progress; the hook is running.
-            }
-        }
-    }
+@DisableCachingByDefault(because = "Network tasks mutate proxy configuration")
+abstract class ReloadNetworkTask : org.gradle.api.DefaultTask() {
+    @TaskAction fun reloadNetwork() { val e = extension(project); NetworkTaskSupport.run(project, RuntimeCommand.ReloadNetwork(ReloadNetworkRequest(e.networkTargetServer.get(), port(e.networkProxyPort.get(), "networkProxyPort", true), e.networkOnlineMode.get(), duration(e.networkControlTimeout.get(), "networkControlTimeout"))), false) }
 }
 
-abstract class RunNetworkTask : DefaultTask() {
-    @TaskAction
-    fun runNetwork() {
-        val project = project
-        val base = property(project, "networkBase") ?: "run/network"
-        val name = property(project, "networkBackend") ?: project.name
-        check(name.matches(Regex("[A-Za-z0-9_-]+"))) {
-            "networkBackend '$name' invalid (use [A-Za-z0-9_-]+)"
-        }
-
-        val baseDir = project.layout.projectDirectory.dir(base).asFile
-        val harnessBin = harnessBin(project)
-        deployBackendJar(project, baseDir, name)
-
-        val proxyPort = resolveProxyPort(project)
-        val users = devUsers(project)
-        println("== runNetwork: standalone backend '$name'; proxy -> $proxyPort; ops -> $users (BASE=$base)")
-
-        val process = launch(
-            project,
-            listOf(harnessBin.resolve("dev-network.sh").absolutePath),
-            mapOf(
-                "BASE" to baseDir.absolutePath,
-                "BACKENDS" to name,
-                "PROXY_PORT" to proxyPort.toString(),
-                "DEV_USERS" to users,
-                "NETWORK_ROLE" to "full"
-            ) + proxyOnlineModeEnvironment(project)
-        )
-        val exit = waitFor(process, "full network")
-        if (exit != 0 && exit != 130) {
-            throw GradleException("dev network exited with code $exit")
-        }
-    }
+@DisableCachingByDefault(because = "Network tasks restart an external Paper process")
+abstract class RestartBackendTask : org.gradle.api.DefaultTask() {
+    @TaskAction fun restartBackend() { val e = extension(project); val name = backendName(project); val requestedPort = e.networkBackendPort.orNull?.let { port(it, "networkBackendPort") }; NetworkTaskSupport.run(project, RuntimeCommand.RestartBackend(RestartBackendRequest(name, managedOwner(project, name), requestedPort, baseDir(project).resolve("runtime/auto/$name").toPath(), pluginJar = configuredJar(project).toPath(), readinessTimeout = duration(e.networkTimeout.get(), "networkTimeout"), shutdownTimeout = duration(e.networkShutdownTimeout.get(), "networkShutdownTimeout"))), false) }
 }
 
-private fun property(project: Project, name: String): String? =
-    project.findProperty(name) as String?
-
-private fun devUsers(project: Project): String =
-    property(project, "networkDevUsers")
-        ?: System.getenv("DEV_NETWORK_DEV_USERS")
-        ?: "dev"
-
-private fun proxyOnlineModeEnvironment(project: Project): Map<String, String> {
-    val value = property(project, "networkOnlineMode") ?: return emptyMap()
-    check(value == "true" || value == "false") {
-        "networkOnlineMode '$value' invalid (use true or false)"
-    }
-    return mapOf("PROXY_ONLINE_MODE" to value)
+@DisableCachingByDefault(because = "Network status probes external services")
+abstract class NetworkStatusTask : org.gradle.api.DefaultTask() {
+    @TaskAction fun networkStatus() { val e = extension(project); NetworkTaskSupport.run(project, RuntimeCommand.NetworkStatus(NetworkStatusRequest(e.networkTargetServer.get(), port(e.networkProxyPort.get(), "networkProxyPort", true).takeIf { it != 0 }, port(e.networkLobbyPort.get(), "networkLobbyPort"), duration(e.networkTimeout.get(), "networkTimeout"))), false) }
 }
 
-private fun harnessBin(project: Project): File {
-    val resolved = property(project, "devNetworkBin")
-        ?.let { project.file(it).absolutePath }
-        ?: System.getenv("DEV_NETWORK_BIN")
-        ?: System.getenv("DEV_NETWORK_DIR")?.let { project.file("$it/bin").absolutePath }
-        ?: project.gradle.includedBuilds
-            .asSequence()
-            .map { it.projectDir.resolve("bin") }
-            .firstOrNull { it.resolve("dev-network.sh").isFile }
-            ?.absolutePath
-        ?: project.rootProject.projectDir.resolve("development-network/bin")
-            .takeIf { it.isDirectory }
-            ?.absolutePath
-        ?: project.rootProject.projectDir.parentFile
-            .resolve("server-development-skills/development-network/bin")
-            .takeIf { it.isDirectory }
-            ?.absolutePath
-
-    check(resolved != null && project.file("$resolved/dev-network.sh").isFile) {
-        "development-network harness bin not found — set -PdevNetworkBin, \$DEV_NETWORK_BIN, \$DEV_NETWORK_DIR, or include this build with a composite build"
-    }
-    return project.file(resolved)
-}
-
-private fun deployBackendJar(project: Project, baseDir: File, name: String) {
-    val pluginsDir = baseDir.resolve("runtime/auto/$name/plugins")
-    pluginsDir.mkdirs()
-
-    // Stale CalVer jars accumulate; deploy only the fresh one.
-    pluginsDir.listFiles { file -> file.extension == "jar" }?.forEach { it.delete() }
-
-    val jarTaskName = property(project, "networkJarTask") ?: "jar"
-    val jarTask = project.tasks.named(jarTaskName).get()
-    val jarFile = (jarTask as? Jar)?.archiveFile?.get()?.asFile
-        ?: error("task '$jarTaskName' is not a Jar task — set -PnetworkJarTask to a Jar task")
-    check(jarFile.isFile) { "missing $jarFile — run $jarTaskName first" }
-
-    val deployed = pluginsDir.resolve(jarFile.name)
-    jarFile.copyTo(deployed, overwrite = true)
-}
-
-private fun resolveProxyPort(project: Project): Int {
-    val configured = property(project, "networkProxyPort")?.toIntOrNull() ?: 25565
-    check(configured == 0 || configured in 1024..65535) {
-        "networkProxyPort '$configured' invalid (use 0 or 1024..65535)"
-    }
-    return if (configured == 0) findFreePort(25565) else configured
-}
-
-private fun findFreePort(start: Int): Int {
-    var port = start
-    while (port < 65535) {
-        val socket = ServerSocket()
-        try {
-            socket.reuseAddress = true
-            socket.bind(InetSocketAddress("127.0.0.1", port))
-            return port
-        } catch (_: java.io.IOException) {
-            port++
-        } finally {
-            socket.close()
-        }
-    }
-    throw GradleException("no free port found from $start")
-}
-
-private fun registrationOwner(project: Project, name: String): String {
-    val configured = property(project, "networkRegistrationOwner")
-        ?.trim()
-        ?.takeIf { it.isNotEmpty() }
-    if (configured != null) {
-        return configured
-    }
-    val projectId = "${project.path}:$name".replace(Regex("[^A-Za-z0-9_.:/-]"), "_")
-    return "gradle-$projectId"
-}
-
-private fun managedRegistrationOwner(project: Project, name: String): String =
-    "${registrationOwner(project, name)}-${ProcessHandle.current().pid()}-${System.nanoTime()}"
-
-private fun launch(
-    project: Project,
-    command: List<String>,
-    environment: Map<String, String>,
-    removeInherited: Set<String> = emptySet()
-): Process {
-    val builder = ProcessBuilder(command)
-        .directory(project.rootProject.projectDir)
-        .inheritIO()
-    val processEnvironment = builder.environment()
-    removeInherited.forEach { processEnvironment.remove(it) }
-    processEnvironment.putAll(environment)
-    return builder.start()
-}
-
-private fun waitFor(process: Process, label: String): Int =
-    try {
-        process.waitFor()
-    } catch (error: InterruptedException) {
-        process.destroy()
-        Thread.currentThread().interrupt()
-        throw GradleException("$label interrupted", error)
-    }
-
-private fun waitForPid(pidFile: File, name: String): Long {
-    val deadline = System.nanoTime() + 300_000_000_000L
-    while (System.nanoTime() < deadline) {
-        val pid = if (pidFile.isFile) pidFile.readText().trim().toLongOrNull() else null
-        if (pid != null) {
-            return pid
-        }
-        try {
-            Thread.sleep(250)
-        } catch (error: InterruptedException) {
-            Thread.currentThread().interrupt()
-            throw GradleException("waiting for backend '$name' was interrupted", error)
-        }
-    }
-    throw GradleException("backend '$name' did not create $pidFile within 300s")
-}
-
-private fun waitForBackend(pid: Long, name: String) {
-    while (ProcessHandle.of(pid).map { it.isAlive }.orElse(false)) {
-        try {
-            Thread.sleep(1000)
-        } catch (error: InterruptedException) {
-            Thread.currentThread().interrupt()
-            throw GradleException("waiting for backend '$name' was interrupted", error)
-        }
-    }
-}
+private fun infrastructure(owner: String, e: DevelopmentNetworkExtension) = InfrastructureRequest(
+    proxyPort = port(e.networkProxyPort.get(), "networkProxyPort", true), lobbyPort = port(e.networkLobbyPort.get(), "networkLobbyPort"), targetServer = e.networkTargetServer.get(), onlineMode = e.networkOnlineMode.get(), owner = owner,
+    readinessTimeout = duration(e.networkTimeout.get(), "networkTimeout"), shutdownTimeout = duration(e.networkShutdownTimeout.get(), "networkShutdownTimeout"), devUsers = users(e),
+)

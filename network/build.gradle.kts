@@ -2,6 +2,7 @@ import java.time.LocalDate
 import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
 import org.gradle.jvm.tasks.Jar
+import org.gradle.language.jvm.tasks.ProcessResources
 
 plugins {
     `java-gradle-plugin`
@@ -42,6 +43,7 @@ repositories {
 }
 
 dependencies {
+    implementation(project(":runtime"))
     testImplementation(kotlin("test"))
     testImplementation(kotlin("test-junit5"))
     testImplementation("org.junit.jupiter:junit-jupiter:5.13.4")
@@ -54,6 +56,16 @@ val runtimeProject = project(":runtime")
 val runtimeJar = runtimeProject.tasks.named<Jar>("jar")
 
 tasks.named<Jar>("jar") {
+    duplicatesStrategy = org.gradle.api.file.DuplicatesStrategy.EXCLUDE
+    dependsOn(runtimeJar)
+    from(runtimeProject.sourceSets.main.get().output)
+    from(runtimeJar) {
+        into("META-INF/development-network")
+        rename { "runtime.jar" }
+    }
+}
+
+tasks.named<ProcessResources>("processResources") {
     dependsOn(runtimeJar)
     from(runtimeJar) {
         into("META-INF/development-network")

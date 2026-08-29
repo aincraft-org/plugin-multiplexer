@@ -1,5 +1,5 @@
 # Runtime / generated artifacts
-runtime/
+/runtime/
 binaries/
 logs/
 

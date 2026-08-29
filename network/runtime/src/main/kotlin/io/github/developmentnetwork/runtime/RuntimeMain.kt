@@ -126,6 +126,7 @@ fun parseRuntimeCommand(request: RuntimeRequest): RuntimeCommand {
                     backendPort = optionalPort(settings, "backend-port", "port"),
                     backendOwner = owner,
                     backendWorkDir = settings["backend-dir"]?.let(Path::of),
+                    backendPluginJar = settings["plugin-jar"]?.let(Path::of),
                     readinessTimeout = readinessTimeout,
                     shutdownTimeout = shutdownTimeout,
                     mapOptions = mapOptions,
@@ -136,7 +137,7 @@ fun parseRuntimeCommand(request: RuntimeRequest): RuntimeCommand {
         "runBackend", "serve-backend" -> {
             requireKeys(command, settings, BACKEND_KEYS)
             val backendName = validatedName(name)
-            val backendPort = requiredPort(settings, "backend-port", "port")
+            val backendPort = optionalPort(settings, "backend-port", "port")
             val workDir = settings["backend-dir"]?.let(Path::of)
                 ?: base.resolve("runtime/auto/${backendName.value}")
             return RuntimeCommand.ServeBackend(
@@ -145,6 +146,7 @@ fun parseRuntimeCommand(request: RuntimeRequest): RuntimeCommand {
                     owner = owner,
                     port = backendPort,
                     workDir = workDir,
+                    pluginJar = settings["plugin-jar"]?.let(Path::of),
                     readinessTimeout = readinessTimeout,
                     shutdownTimeout = shutdownTimeout,
                     devUsers = users(settings),
@@ -267,9 +269,9 @@ private val PROXY_KEYS = setOf(
     "registration-owner", "timeout", "shutdown-timeout", "lobby-map-url", "lobby-map-sha256",
     "lobby-map-random-url", "dev-users",
 )
-private val FULL_KEYS = PROXY_KEYS + setOf("name", "backend", "network-backend", "backend-port", "port", "backend-dir")
+private val FULL_KEYS = PROXY_KEYS + setOf("name", "backend", "network-backend", "backend-port", "port", "backend-dir", "plugin-jar")
 private val BACKEND_KEYS = setOf(
-    "base", "name", "backend", "network-backend", "backend-port", "port", "backend-dir", "owner",
+    "base", "name", "backend", "network-backend", "backend-port", "port", "backend-dir", "plugin-jar", "owner",
     "registration-owner", "timeout", "shutdown-timeout", "dev-users",
 )
 private val EXTERNAL_REGISTER_KEYS = setOf(

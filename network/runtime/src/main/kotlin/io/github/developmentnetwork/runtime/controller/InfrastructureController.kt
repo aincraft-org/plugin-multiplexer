@@ -76,6 +76,7 @@ data class InfrastructureRequest(
     val backendPort: Int? = null,
     val backendOwner: String = owner,
     val backendWorkDir: Path? = null,
+    val backendPluginJar: Path? = null,
     val proxyCommand: List<String> = emptyList(),
     val lobbyCommand: List<String> = emptyList(),
     val backendCommand: List<String> = emptyList(),
@@ -115,6 +116,8 @@ class InfrastructureController(
         activeRequest = request
         runThread = Thread.currentThread()
         stopRequested.set(false)
+        val shutdownHook = Thread { requestStop() }
+        Runtime.getRuntime().addShutdownHook(shutdownHook)
         return try {
             withProxyLock { runLocked(mode, request) }
         } catch (_: InterruptedException) {
@@ -129,7 +132,11 @@ class InfrastructureController(
             System.err.println("infrastructure controller: ${error.message ?: error::class.simpleName}")
             1
         } finally {
-            runThread = null
+            try {
+                Runtime.getRuntime().removeShutdownHook(shutdownHook)
+            } catch (_: IllegalStateException) {
+                // JVM shutdown is already in progress; the hook is running.
+            }
             activeRequest = null
             proxyProcess = null
             lobbyProcess = null
@@ -164,35 +171,78 @@ class InfrastructureController(
             require(backendName != null) { "full infrastructure mode requires backendName" }
         }
 
-        val registrations = registry.readRegistrations()
-        val ports = registrations.associate { it.name.value to it.port }.toMutableMap()
-        val existingBackend = backendName?.let(registry::readRegistration)
-        if (mode == InfrastructureMode.FULL && existingBackend != null) {
-            require(existingBackend.owner == request.backendOwner) {
-                "Backend $backendName is already owned by ${existingBackend.owner}"
+        val fullStartingMarker = backendName?.takeIf { mode == InfrastructureMode.FULL }?.let {
+            layout.runtimeDir.resolve("${it.value}.full-starting")
+        }
+        val startingMarkers = backendName?.let {
+            listOf(
+                layout.runtimeDir.resolve("${it.value}.starting"),
+                layout.runtimeDir.resolve("${it.value}.full-starting"),
+            )
+        }.orEmpty()
+        val allocation = registry.withRegistrationTransition {
+            val registrations = readRegistrations()
+            val staleMarkers = startingMarkers.filter { Files.exists(it) }.filter { marker ->
+                val markerLines = AtomicFiles.read(marker).lineSequence().toList()
+                val markerPid = markerLines.firstOrNull()?.toLongOrNull()
+                require(markerPid == null || !ProcessHandle.of(markerPid).map { it.isAlive }.orElse(false)) {
+                    "Backend $backendName is already starting"
+                }
+                true
             }
-            require(existingBackend.mode == OwnershipMode.MANAGED) {
-                "Backend $backendName is external; full mode cannot start it"
-            }
-            existingBackend.process?.let { identity ->
-                require(!identityIsLive(identity)) {
-                    "Backend $backendName is already running under owner ${existingBackend.owner}"
+            val markerOwners = staleMarkers.mapNotNull {
+                AtomicFiles.read(it).lineSequence().drop(1).firstOrNull()
+            }.toSet()
+            var existing = backendName?.let(::readRegistration)
+            var persistedPort = existing?.port
+            var reclaimed = false
+            if (mode == InfrastructureMode.FULL && existing != null) {
+                require(existing.owner == request.backendOwner) {
+                    "Backend $backendName is already owned by ${existing.owner}"
+                }
+                require(existing.mode == OwnershipMode.MANAGED) {
+                    "Backend $backendName is external; full mode cannot start it"
+                }
+                if (existing.process == null && markerOwners == setOf(request.backendOwner)) {
+                    persistedPort = existing.port
+                    unregister(backendName!!, request.backendOwner)
+                    existing = null
+                    reclaimed = true
+                }
+                if (!reclaimed) require(existing != null) {
+                    "Backend $backendName is reserved or starting under owner ${request.backendOwner}"
+                }
+                existing?.process?.let { identity ->
+                    require(!identityIsLive(identity)) {
+                        "Backend $backendName is already running under owner ${existing?.owner}"
+                    }
                 }
             }
+            if (markerOwners == setOf(request.backendOwner)) staleMarkers.forEach(Files::deleteIfExists)
+            val ports = registrations.associate { it.name.value to it.port }.toMutableMap()
+            val resolvedPort = backendName?.let { name ->
+                PortAllocator().allocate(
+                    name,
+                    (registrations.map { it.name } + name).distinct(),
+                    persisted = persistedPort,
+                    explicit = request.backendPort,
+                    occupied = registrations.filter { it.name != name }.map { it.port }.toSet(),
+                    reserved = setOf(request.proxyPort, request.lobbyPort),
+                ).also { ports[name.value] = it }
+            }
+            if (mode == InfrastructureMode.FULL && backendName != null && resolvedPort != null) {
+                AtomicFiles.write(fullStartingMarker!!, "${ProcessHandle.current().pid()}\n${request.backendOwner}\n")
+                if (existing == null) register(BackendRegistration(backendName, resolvedPort, request.backendOwner, OwnershipMode.MANAGED, null))
+            }
+            Triple(registrations, existing, resolvedPort)
         }
-
-        val resolvedBackendPort = backendName?.let { name ->
-            val namesForAllocation = (registrations.map { it.name } + name).distinct()
-            val persistedPort = existingBackend?.port
-            val occupied = registrations.filter { it.name != name }.map { it.port }.toSet()
-            PortAllocator().allocate(
-                name,
-                namesForAllocation,
-                persisted = persistedPort,
-                explicit = request.backendPort,
-                occupied = occupied,
-                reserved = setOf(request.proxyPort, request.lobbyPort),
-            ).also { ports[name.value] = it }
+        val registrations = allocation.first
+        val existingBackend = allocation.second
+        val ports = registrations.associate { it.name.value to it.port }.toMutableMap()
+        val resolvedBackendPort = allocation.third
+        resolvedBackendPort?.let { backendName?.let { name -> ports[name.value] = it } }
+        if (mode == InfrastructureMode.FULL && backendName != null && resolvedBackendPort != null && existingBackend == null) {
+            backendReservation = BackendReservation(backendName, request.backendOwner, resolvedBackendPort)
         }
 
         var control: Closeable? = null
@@ -228,6 +278,7 @@ class InfrastructureController(
             val backendDir = if (mode == InfrastructureMode.FULL && backendName != null && resolvedBackendPort != null) {
                 val dir = request.backendWorkDir ?: layout.base.resolve("runtime/auto/${backendName.value}")
                 Files.createDirectories(dir)
+                request.backendPluginJar?.let { deployPluginJar(it, dir) }
                 paperWriter.writeManaged(dir, PaperConfig(resolvedBackendPort))
                 opsWriter.write(dir, request.devUsers)
                 check(preflight.verifyPaper(dir, external = false).success) {
@@ -300,6 +351,7 @@ class InfrastructureController(
         } finally {
             // Keep the authenticated control lease through all child cleanup.
             cleanup(request)
+            fullStartingMarker?.let { Files.deleteIfExists(it) }
             control?.close()
         }
     }
@@ -387,14 +439,18 @@ class InfrastructureController(
             val proxyResult = proxy?.let { terminateSafely(it, request.shutdownTimeout) }
 
             val reservation = backendReservation
-            if (reservation != null && backend != null && backendResult?.success == true) {
+            if (reservation != null) {
                 val current = runCatching { RegistryStore(layout).readRegistration(reservation.name) }.getOrNull()
-                // Never unregister an external claim, even if it reuses our owner string.
-                if (current?.mode == OwnershipMode.MANAGED &&
+                // Remove an unstarted placeholder, or a successfully terminated
+                // process registration, only when the complete claim still matches.
+                val claimMatches = current?.mode == OwnershipMode.MANAGED &&
                     current.owner == reservation.owner &&
-                    current.port == reservation.port &&
-                    current.process == backend.identity
-                ) {
+                    current.port == reservation.port
+                val placeholder = backend == null && current?.process == null
+                val terminatedProcess = backend != null &&
+                    backendResult?.success == true &&
+                    current?.process == backend.identity
+                if (claimMatches && (placeholder || terminatedProcess)) {
                     runCatching { RegistryStore(layout).unregister(reservation.name, reservation.owner) }
                 }
             }
@@ -630,8 +686,9 @@ fun interface EndpointReadiness {
 data class ManagedBackendRequest(
     val name: String,
     val owner: String,
-    val port: Int,
+    val port: Int? = null,
     val workDir: Path,
+    val pluginJar: Path? = null,
     val paperCommand: List<String> = emptyList(),
     val artifacts: RuntimeArtifactProvider = PinnedRuntimeArtifactProvider(),
     val readinessHost: String = "127.0.0.1",
@@ -654,7 +711,6 @@ class ManagedBackendController(
     private val stopRequested = AtomicBoolean(false)
     private val wakeMonitor = Object()
     private var reservation: ManagedReservation? = null
-
     fun run(request: ManagedBackendRequest): Int {
         activeRequest = request
         runThread = Thread.currentThread()
@@ -662,15 +718,67 @@ class ManagedBackendController(
         val name = BackendName(request.name)
         val state = layout.backend(name)
         val registry = RegistryStore(layout)
-        val existing = registry.readRegistration(name)
-        if (existing != null) {
-            require(existing.owner == request.owner) { "Backend $name is already owned by ${existing.owner}" }
-            require(existing.mode == OwnershipMode.MANAGED) { "Backend $name is external; managed controller cannot claim it" }
+        val startingMarkers = listOf(
+            layout.runtimeDir.resolve("${name.value}.starting"),
+            layout.runtimeDir.resolve("${name.value}.full-starting"),
+        )
+        val startingMarker = startingMarkers.first()
+        val allocation = registry.withRegistrationTransition {
+            Files.createDirectories(layout.runtimeDir)
+            val staleMarkers = startingMarkers.filter { Files.exists(it) }.filter { marker ->
+                val markerLines = AtomicFiles.read(marker).lineSequence().toList()
+                val markerPid = markerLines.firstOrNull()?.toLongOrNull()
+                require(markerPid == null || !ProcessHandle.of(markerPid).map { it.isAlive }.orElse(false)) {
+                    "Backend $name is already starting"
+                }
+                true
+            }
+            val markerOwners = staleMarkers.mapNotNull {
+                AtomicFiles.read(it).lineSequence().drop(1).firstOrNull()
+            }.toSet()
+            val registrations = readRegistrations()
+            var existing = readRegistration(name)
+            var persistedPort = existing?.port
+            var reclaimed = false
+            if (existing != null) {
+                require(existing.owner == request.owner) { "Backend $name is already owned by ${existing.owner}" }
+                require(existing.mode == OwnershipMode.MANAGED) { "Backend $name is external; managed controller cannot claim it" }
+                if (existing.process == null && markerOwners == setOf(request.owner)) {
+                    persistedPort = existing.port
+                    unregister(name, request.owner)
+                    existing = null
+                    reclaimed = true
+                }
+                existing?.process?.let { identity ->
+                    require(!ProcessHandle.of(identity.pid).map { it.isAlive }.orElse(false)) {
+                        "Backend $name is already running under owner ${existing?.owner}"
+                    }
+                }
+                if (!reclaimed) require(existing != null) {
+                    "Backend $name is reserved or starting under owner ${request.owner}"
+                }
+            }
+            if (markerOwners == setOf(request.owner)) staleMarkers.forEach(Files::deleteIfExists)
+            val port = persistedPort ?: PortAllocator().allocate(
+                name,
+                (registrations.map { it.name } + name).distinct(),
+                explicit = request.port,
+                occupied = registrations.filter { it.name != name }.map { it.port }.toSet() + setOf(PortAllocator.PROXY_PORT, PortAllocator.LOBBY_PORT),
+            )
+            AtomicFiles.write(startingMarker, "${ProcessHandle.current().pid()}\n${request.owner}\n")
+            if (existing == null) register(BackendRegistration(name, port, request.owner, OwnershipMode.MANAGED, null))
+            Triple(registrations, existing, port)
         }
-        val port = existing?.port ?: request.port
+        val registrations = allocation.first
+        val existing = allocation.second
+        val port = allocation.third
+        if (existing == null) reservation = ManagedReservation(name, port = port, owner = request.owner)
+        val shutdownHook = Thread { stop(request) }
+        Runtime.getRuntime().addShutdownHook(shutdownHook)
         return try {
             Files.createDirectories(request.workDir)
             Files.createDirectories(layout.runtimeDir)
+            request.pluginJar?.let { deployPluginJar(it, request.workDir) }
             val paperJar = layout.binariesDir.resolve(
                 "paper-${PinnedRuntimeArtifactProvider.PAPER_VERSION}-${PinnedRuntimeArtifactProvider.PAPER_BUILD}.jar",
             )
@@ -686,14 +794,11 @@ class ManagedBackendController(
                 listOf(Path.of(System.getProperty("java.home"), "bin", "java").toString(), "-jar", paperJar.toString(), "--nogui")
             }
             val process = processSupervisor.launch(command, request.workDir)
-            // Retain the exact process handle before registration/readiness can fail.
             active = process
             registry.register(BackendRegistration(name, port, request.owner, OwnershipMode.MANAGED, process.identity))
             awaitReadiness(process, request.readinessHost, port, request.readinessTimeout)
             AtomicFiles.write(state.ready, "ready\n")
-            while (process.process.isAlive && !stopRequested.get()) {
-                awaitWake(50)
-            }
+            while (process.process.isAlive && !stopRequested.get()) awaitWake(50)
             0
         } catch (_: InterruptedException) {
             if (stopRequested.get()) 0 else 1
@@ -702,6 +807,12 @@ class ManagedBackendController(
             1
         } finally {
             cleanup(request)
+            startingMarkers.forEach(Files::deleteIfExists)
+            try {
+                Runtime.getRuntime().removeShutdownHook(shutdownHook)
+            } catch (_: IllegalStateException) {
+                // JVM shutdown is already in progress; the hook is running.
+            }
             runThread = null
             active = null
             activeRequest = null
@@ -804,3 +915,15 @@ class ManagedBackendController(
 typealias ReloadNetworkRequest = io.github.developmentnetwork.runtime.service.ReloadNetworkRequest
 typealias StopNetworkRequest = io.github.developmentnetwork.runtime.service.StopNetworkRequest
 typealias RestartBackendRequest = io.github.developmentnetwork.runtime.service.RestartBackendRequest
+
+private fun deployPluginJar(source: Path, workDir: Path) {
+    require(Files.isRegularFile(source)) { "Managed plugin JAR does not exist: $source" }
+    val pluginsDir = workDir.resolve("plugins")
+    Files.createDirectories(pluginsDir)
+    Files.list(pluginsDir).use { entries ->
+        entries.filter { it.fileName.toString().endsWith(".jar") }.forEach { stale ->
+            check(Files.deleteIfExists(stale)) { "Unable to delete stale plugin JAR: $stale" }
+        }
+    }
+    Files.copy(source, pluginsDir.resolve(source.fileName.toString()), java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+}

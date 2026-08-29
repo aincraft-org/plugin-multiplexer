@@ -10,6 +10,10 @@ import io.github.developmentnetwork.runtime.model.OwnershipMode
 import io.github.developmentnetwork.runtime.process.ProcessSupervisor
 import io.github.developmentnetwork.runtime.state.RuntimeLayout
 import java.net.ServerSocket
+import io.github.developmentnetwork.runtime.model.BackendName
+import io.github.developmentnetwork.runtime.model.BackendRegistration
+import io.github.developmentnetwork.runtime.registry.RegistryStore
+import io.github.developmentnetwork.runtime.state.AtomicFiles
 import java.nio.file.Files
 import java.nio.file.Path
 import java.time.Duration
@@ -93,6 +97,78 @@ class ControllerLifecycleTest {
     }
 
     @Test
+    fun managedBackendReclaimsItsDeadStartingMarkerAndPlaceholder() {
+        val base = Files.createTempDirectory("runtime-managed-recovery")
+        val layout = RuntimeLayout(base)
+        val port = freePort()
+        val name = BackendName("recover")
+        val owner = "owner-recover"
+        RegistryStore(layout).withRegistrationTransition {
+            register(BackendRegistration(name, port, owner, OwnershipMode.MANAGED, null))
+        }
+        val marker = layout.runtimeDir.resolve("${name.value}.starting")
+        AtomicFiles.write(marker, "999999\n$owner\n")
+        val request = ManagedBackendRequest(
+            name = name.value,
+            owner = owner,
+            port = port,
+            workDir = base.resolve("managed"),
+            paperCommand = FakeJavaServer.command(System.getProperty("java.class.path"), port, "paper"),
+            artifacts = FakeArtifacts,
+            readinessTimeout = Duration.ofSeconds(5),
+        )
+        val controller = ManagedBackendController(layout)
+        val running = thread(start = true) { controller.run(request) }
+        await(layout.backend(name).ready)
+        assertEquals(port, Files.readString(layout.backend(name).port).trim().toInt())
+        controller.stop(request)
+        running.join(10_000)
+        assertFalse(running.isAlive)
+        assertFalse(Files.exists(layout.backend(name).owner))
+    }
+
+    @Test
+    fun fullModeReclaimsDeadManagedMarkerBeforeStartingItsPlaceholder() {
+        val base = Files.createTempDirectory("runtime-full-recovery")
+        val layout = RuntimeLayout(base)
+        val proxyPort: Int
+        val lobbyPort: Int
+        val backendPort: Int
+        val name = BackendName("full-recover")
+        val owner = "owner-full-recover"
+        val ports = freePorts(3)
+        proxyPort = ports[0]
+        lobbyPort = ports[1]
+        backendPort = ports[2]
+        RegistryStore(layout).withRegistrationTransition {
+            register(BackendRegistration(name, backendPort, owner, OwnershipMode.MANAGED, null))
+        }
+        AtomicFiles.write(layout.runtimeDir.resolve("${name.value}.starting"), "999999\n$owner\n")
+        val request = InfrastructureRequest(
+            proxyPort = proxyPort,
+            lobbyPort = lobbyPort,
+            onlineMode = false,
+            proxyCommand = FakeJavaServer.command(FakeJavaServer.classPath(), proxyPort, "proxy"),
+            lobbyCommand = FakeJavaServer.command(FakeJavaServer.classPath(), lobbyPort, "lobby"),
+            backendName = name.value,
+            backendOwner = owner,
+            backendPort = backendPort,
+            backendCommand = FakeJavaServer.command(FakeJavaServer.classPath(), backendPort, "backend"),
+            proxyReadinessPort = proxyPort,
+            lobbyReadinessPort = lobbyPort,
+            artifacts = FakeArtifacts,
+            readinessTimeout = Duration.ofSeconds(5),
+        )
+        val controller = InfrastructureController(layout)
+        val running = thread(start = true) { controller.run(InfrastructureMode.FULL, request) }
+        await(layout.backend(name).ready)
+        assertEquals(backendPort, Files.readString(layout.backend(name).port).trim().toInt())
+        controller.stop(request)
+        running.join(10_000)
+        assertFalse(running.isAlive)
+    }
+
+    @Test
     fun fullModeStartsOnlyItsManagedBackendAndUnexpectedLobbyRestartIsDelayed() {
         val base = Files.createTempDirectory("runtime-full-controller")
         val layout = RuntimeLayout(base)
@@ -133,6 +209,14 @@ class ControllerLifecycleTest {
     }
 
     private fun freePort(): Int = ServerSocket(0).use { it.localPort }
+    private fun freePorts(count: Int): List<Int> {
+        val sockets = List(count) { ServerSocket(0) }
+        return try {
+            sockets.map { it.localPort }
+        } finally {
+            sockets.forEach(ServerSocket::close)
+        }
+    }
 
     private object FakeArtifacts : RuntimeArtifactProvider {
         override fun velocity(destination: Path): Path = destination.also { Files.createDirectories(it.parent) }
@@ -143,7 +227,6 @@ object FakeJavaServer {
     fun classPath(): String =
         System.getProperty("java.class.path") + java.io.File.pathSeparator +
             kotlin.Unit::class.java.protectionDomain.codeSource.location.path
-
     fun command(classPath: String, port: Int, label: String, vararg options: String): List<String> =
         listOf("java", "-cp", classPath, "io.github.developmentnetwork.runtime.FakeJavaServerMain", port.toString(), label) + options.toList()
 }
