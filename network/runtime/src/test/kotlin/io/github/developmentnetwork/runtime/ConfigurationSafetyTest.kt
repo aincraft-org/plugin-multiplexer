@@ -105,6 +105,7 @@ class ConfigurationSafetyTest {
             """
             no-permission: <red>You do not have permission to use this command.
               Please contact an administrator if you believe this is a mistake.
+              This message contains another continuation line.
             proxies:
               velocity:
                 enabled: true

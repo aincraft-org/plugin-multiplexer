@@ -178,7 +178,10 @@ class OfflinePreflight {
         content.lineSequence().forEachIndexed { index, rawLine ->
             if (rawLine.contains('\t')) throw IllegalArgumentException("line ${index + 1} contains a tab")
             val trimmed = rawLine.trim()
-            if (trimmed.isEmpty() || trimmed.startsWith('#')) return@forEachIndexed
+            if (trimmed.isEmpty() || trimmed.startsWith('#')) {
+                scalarContinuationIndent = null
+                return@forEachIndexed
+            }
             if (trimmed == "-" || trimmed.startsWith("- ")) {
                 scalarContinuationIndent = null
                 return@forEachIndexed
@@ -190,7 +193,7 @@ class OfflinePreflight {
                 require(previousScalarIndent != null && indent > previousScalarIndent) {
                     "line ${index + 1} must use key: value"
                 }
-                scalarContinuationIndent = null
+                scalarContinuationIndent = previousScalarIndent
                 return@forEachIndexed
             }
             require(separator > 0) { "line ${index + 1} must use key: value" }
