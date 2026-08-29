@@ -27,11 +27,14 @@ object NetworkTaskSupport {
             process.waitFor()
         } catch (error: InterruptedException) {
             if (longLived) requestRuntimeShutdown(project, extension, command)
-            process.destroy()
+            val gracefulWait = cleanupWaitSeconds(extension)
             try {
-                if (!process.waitFor(INTERRUPTION_CLEANUP_SECONDS, TimeUnit.SECONDS)) {
-                    process.destroyForcibly()
-                    process.waitFor(INTERRUPTION_CLEANUP_SECONDS, TimeUnit.SECONDS)
+                if (!process.waitFor(gracefulWait, TimeUnit.SECONDS)) {
+                    process.destroy()
+                    if (!process.waitFor(gracefulWait, TimeUnit.SECONDS)) {
+                        process.destroyForcibly()
+                        process.waitFor(gracefulWait, TimeUnit.SECONDS)
+                    }
                 }
             } catch (_: InterruptedException) {
                 process.destroyForcibly()
@@ -44,13 +47,18 @@ object NetworkTaskSupport {
         return exit
     }
 
-    private fun requestRuntimeShutdown(project: Project, extension: DevelopmentNetworkExtension, command: RuntimeCommand) {
+    private fun requestRuntimeShutdown(
+        project: Project,
+        extension: DevelopmentNetworkExtension,
+        command: RuntimeCommand,
+    ): Boolean {
         val owner = when (command) {
             is RuntimeCommand.ServeProxy -> command.request.owner
             is RuntimeCommand.ServeFull -> command.request.owner
-            else -> return
+            is RuntimeCommand.ServeBackend -> command.request.owner
+            else -> return false
         }
-        runCatching {
+        return runCatching {
             val shutdown = RuntimeArtifactLauncher.launch(
                 project.projectDir,
                 project.gradle.gradleUserHomeDir,
@@ -58,15 +66,22 @@ object NetworkTaskSupport {
                     "stopNetwork",
                     "--base=${extension.networkBase.get().asFile.absolutePath}",
                     "--owner=$owner",
-                    "--control-timeout=$INTERRUPTION_CLEANUP_SECONDS",
-                    "--shutdown-timeout=$INTERRUPTION_CLEANUP_SECONDS",
+                    "--managed-only=${command is RuntimeCommand.ServeBackend}",
+                    "--control-timeout=${extension.networkControlTimeout.get()}",
+                    "--shutdown-timeout=${extension.networkShutdownTimeout.get()}",
                 ),
             )
-            if (!shutdown.waitFor(INTERRUPTION_CLEANUP_SECONDS, TimeUnit.SECONDS)) {
-                shutdown.destroyForcibly()
+            val waitSeconds = cleanupWaitSeconds(extension)
+            if (!shutdown.waitFor(waitSeconds, TimeUnit.SECONDS)) {
+                shutdown.destroy()
+                if (!shutdown.waitFor(waitSeconds, TimeUnit.SECONDS)) shutdown.destroyForcibly()
             }
-        }
+            shutdown.waitFor(1, TimeUnit.SECONDS) && shutdown.exitValue() == 0
+        }.getOrDefault(false)
     }
+    private fun cleanupWaitSeconds(extension: DevelopmentNetworkExtension): Long =
+        extension.networkShutdownTimeout.get().coerceAtLeast(1L)
+
 
     private fun RuntimeCommand.toArguments(extension: DevelopmentNetworkExtension): List<String> {
         val args = mutableListOf(commandName())
@@ -85,6 +100,8 @@ object NetworkTaskSupport {
                 request.port?.let { args += "--backend-port=$it" }
                 args += "--backend-dir=${request.workDir}"
                 args += "--owner=${request.owner}"
+                args += "--proxy-port=${request.proxyPort}"
+                args += "--lobby-port=${request.lobbyPort}"
                 args += "--timeout=${request.readinessTimeout.seconds}"
                 args += "--shutdown-timeout=${request.shutdownTimeout.seconds}"
                 request.pluginJar?.let { args += "--plugin-jar=$it" }
@@ -98,16 +115,19 @@ object NetworkTaskSupport {
                 args += "--host=${request.host}"
                 args += "--target-server=${request.targetServer}"
                 args += "--timeout=${request.readinessTimeout.seconds}"
+                args += "--lobby-port=${request.lobbyPort}"
                 args += "--control-timeout=${request.controlTimeout.seconds}"
             }
             is RuntimeCommand.UnregisterExternal -> {
                 args += "--name=${request.name}"
                 args += "--registration-owner=${request.owner}"
                 args += "--target-server=${request.targetServer}"
+                args += "--lobby-port=${request.lobbyPort}"
                 args += "--control-timeout=${request.controlTimeout.seconds}"
             }
             is RuntimeCommand.StopNetwork -> {
                 request.owner?.let { args += "--owner=$it" }
+                if (request.managedOnly) args += "--managed-only=true"
                 args += "--control-timeout=${request.controlTimeout.seconds}"
                 args += "--shutdown-timeout=${request.shutdownTimeout.seconds}"
             }
@@ -115,6 +135,7 @@ object NetworkTaskSupport {
                 args += "--target-server=${request.targetServer}"
                 args += "--proxy-port=${request.proxyPort}"
                 args += "--online-mode=${request.onlineMode}"
+                args += "--lobby-port=${request.lobbyPort}"
                 args += "--control-timeout=${request.controlTimeout.seconds}"
             }
             is RuntimeCommand.RestartBackend -> {
@@ -162,7 +183,6 @@ object NetworkTaskSupport {
         is RuntimeCommand.NetworkStatus -> "networkStatus"
     }
 
-    private const val INTERRUPTION_CLEANUP_SECONDS = 5L
 }
 
 internal fun extension(project: Project): DevelopmentNetworkExtension = project.extensions.getByType(DevelopmentNetworkExtension::class.java)
@@ -187,8 +207,7 @@ internal fun configuredJar(project: Project): File {
     return file
 }
 
-
-internal fun users(extension: DevelopmentNetworkExtension): List<String> = extension.networkDevUsers.get().split(',').map(String::trim).filter(String::isNotEmpty).also {
+internal fun users(extension: DevelopmentNetworkExtension): List<String> = extension.networkDevUsers.get().split(Regex("[,\\s]+")).map(String::trim).filter(String::isNotEmpty).also {
     require(it.isNotEmpty()) { "networkDevUsers must contain at least one user" }
 }
 internal fun duration(seconds: Long, property: String): Duration = Duration.ofSeconds(seconds).also { require(seconds > 0) { "$property must be positive" } }

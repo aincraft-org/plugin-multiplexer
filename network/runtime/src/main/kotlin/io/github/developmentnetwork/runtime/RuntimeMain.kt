@@ -150,6 +150,8 @@ fun parseRuntimeCommand(request: RuntimeRequest): RuntimeCommand {
                     readinessTimeout = readinessTimeout,
                     shutdownTimeout = shutdownTimeout,
                     devUsers = users(settings),
+                    proxyPort = proxyPort,
+                    lobbyPort = lobbyPort,
                 ),
             )
         }
@@ -167,6 +169,7 @@ fun parseRuntimeCommand(request: RuntimeRequest): RuntimeCommand {
                     targetServer = target,
                     readinessTimeout = readinessTimeout,
                     controlTimeout = controlTimeout,
+                    lobbyPort = lobbyPort,
                 ),
             )
         }
@@ -179,6 +182,7 @@ fun parseRuntimeCommand(request: RuntimeRequest): RuntimeCommand {
                     owner = requiredOwner(settings),
                     targetServer = target,
                     controlTimeout = controlTimeout,
+                    lobbyPort = lobbyPort,
                 ),
             )
         }
@@ -189,6 +193,7 @@ fun parseRuntimeCommand(request: RuntimeRequest): RuntimeCommand {
                     owner = settings["owner"],
                     controlTimeout = controlTimeout,
                     shutdownTimeout = shutdownTimeout,
+                    managedOnly = bool(settings, "managed-only", false),
                 ),
             )
         }
@@ -198,6 +203,7 @@ fun parseRuntimeCommand(request: RuntimeRequest): RuntimeCommand {
                 ReloadNetworkRequest(
                     targetServer = target,
                     proxyPort = proxyPort,
+                    lobbyPort = lobbyPort,
                     onlineMode = onlineMode,
                     controlTimeout = controlTimeout,
                 ),
@@ -272,18 +278,18 @@ private val PROXY_KEYS = setOf(
 private val FULL_KEYS = PROXY_KEYS + setOf("name", "backend", "network-backend", "backend-port", "port", "backend-dir", "plugin-jar")
 private val BACKEND_KEYS = setOf(
     "base", "name", "backend", "network-backend", "backend-port", "port", "backend-dir", "plugin-jar", "owner",
-    "registration-owner", "timeout", "shutdown-timeout", "dev-users",
+    "registration-owner", "proxy-port", "lobby-port", "timeout", "shutdown-timeout", "dev-users",
 )
 private val EXTERNAL_REGISTER_KEYS = setOf(
     "base", "name", "backend", "network-backend", "port", "registration-owner", "owner", "server-dir",
-    "target-server", "host", "timeout", "control-timeout",
+    "target-server", "host", "lobby-port", "timeout", "control-timeout",
 )
 private val EXTERNAL_UNREGISTER_KEYS = setOf(
     "base", "name", "backend", "network-backend", "registration-owner", "owner", "target-server", "host",
-    "control-timeout",
+    "lobby-port", "control-timeout",
 )
-private val STOP_KEYS = setOf("base", "owner", "control-timeout", "shutdown-timeout")
-private val RELOAD_KEYS = setOf("base", "target-server", "host", "proxy-port", "online-mode", "control-timeout")
+private val STOP_KEYS = setOf("base", "owner", "managed-only", "control-timeout", "shutdown-timeout")
+private val RELOAD_KEYS = setOf("base", "target-server", "host", "proxy-port", "lobby-port", "online-mode", "control-timeout")
 private val RESTART_KEYS = setOf(
     "base", "name", "backend", "network-backend", "owner", "registration-owner", "backend-port", "port",
     "backend-dir", "plugin-jar", "timeout", "shutdown-timeout",

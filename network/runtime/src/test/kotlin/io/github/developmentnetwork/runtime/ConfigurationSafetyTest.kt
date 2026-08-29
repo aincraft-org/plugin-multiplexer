@@ -27,18 +27,50 @@ class ConfigurationSafetyTest {
         AtomicFiles.write(layout.backend("zeta").port, "31002\n")
 
         val writer = VelocityConfigWriter()
-        val first = writer.write(layout, VelocityConfig(proxyPort = 25565, targetServer = "devhost", onlineMode = false))
+        val first = writer.write(layout, VelocityConfig(proxyPort = 25565, targetServer = "devhost", onlineMode = false, lobbyPort = 30123))
         val expected = Files.readString(first)
-        writer.write(layout, VelocityConfig(proxyPort = 25565, targetServer = "devhost", onlineMode = false))
+        writer.write(layout, VelocityConfig(proxyPort = 25565, targetServer = "devhost", onlineMode = false, lobbyPort = 30123))
 
         assertEquals(expected, Files.readString(layout.velocityConfig))
         assertContains(expected, "config-version = \"2.8\"")
         assertContains(expected, "bind = \"0.0.0.0:25565\"")
         assertContains(expected, "online-mode = false")
+        assertContains(expected, "lobby = \"devhost:30123\"")
         assertContains(expected, "alpha = \"devhost:31001\"")
         assertContains(expected, "zeta = \"devhost:31002\"")
         assertContains(expected, "try = [\"lobby\", \"alpha\", \"zeta\"]")
         assertEquals("dev-local-forwarding-secret-change-me\n", Files.readString(layout.forwardingSecret))
+    }
+
+    @Test
+    fun proxyOnlineModeMayBeEnabledIndependentlyFromPaperOfflineForwarding() {
+        val work = Files.createTempDirectory("preflight-proxy-online")
+        val proxy = work.resolve("velocity.toml")
+        Files.writeString(
+            proxy,
+            """
+            online-mode = true
+            player-info-forwarding-mode = "modern"
+            forwarding-secret-file = "forwarding.secret"
+            """.trimIndent() + "\n",
+        )
+        Files.writeString(work.resolve("forwarding.secret"), "dev-local-forwarding-secret-change-me\n")
+
+        val result = OfflinePreflight().verifyProxy(proxy)
+
+        assertTrue(result.success, result.message)
+    }
+
+    @Test
+    fun paperPreflightStillRejectsOnlineMode() {
+        val work = Files.createTempDirectory("preflight-paper-online")
+        PaperConfigWriter().writeManaged(work, PaperConfig(port = 30124))
+        Files.writeString(work.resolve("server.properties"), "server-port=30124\nonline-mode=true\n")
+
+        val result = OfflinePreflight().verifyPaper(work)
+
+        assertFalse(result.success)
+        assertContains(result.message, "online-mode=false")
     }
 
     @Test

@@ -112,7 +112,7 @@ class RegistryRulesTest {
         assertEquals(
             30069,
             allocator.allocate(BackendName("alpha"), registry, persisted = null, explicit = null,
-                occupied = setOf(30067), reserved = setOf(30068)),
+                occupied = emptySet(), reserved = setOf(30068), occupiedProbe = { it == 30067 }),
         )
     }
 

@@ -20,6 +20,7 @@ data class StopNetworkRequest(
     val owner: String? = null,
     val controlTimeout: Duration = Duration.ofSeconds(5),
     val shutdownTimeout: Duration = Duration.ofSeconds(30),
+    val managedOnly: Boolean = false,
 )
 
 /** Ask the live controller first; fallback is identity-gated and never process-name based. */
@@ -30,6 +31,7 @@ class StopService(
     private val registry: RegistryStore = RegistryStore(layout),
 ) {
     fun execute(request: StopNetworkRequest = StopNetworkRequest()): Int {
+        if (request.managedOnly) return if (fallbackManaged(request)) 0 else 1
         val controllerRequested = requestController(request)
         if (controllerRequested) {
             // A successful request is not completion. Never signal a second process while
@@ -97,10 +99,29 @@ class StopService(
         return if (actualStart == start) LeaseState.LIVE else LeaseState.DEAD
     }
 
+    private fun fallbackManaged(request: StopNetworkRequest): Boolean {
+        val owner = request.owner?.takeIf { it.isNotBlank() } ?: return false
+        return runCatching {
+            registry.withRegistrationTransition {
+                val managed = readRegistrations().filter { it.mode == OwnershipMode.MANAGED && it.owner == owner }
+                val identities = managed.mapNotNull { it.process }
+                if (managed.isEmpty() || identities.size != managed.size || identities.any { !identityReader.matches(it) }) {
+                    false
+                } else {
+                    managed.all { registration ->
+                        val identity = registration.process ?: return@all false
+                        terminateVerified(identity, request.shutdownTimeout) &&
+                            unregister(registration.name, owner)
+                    }
+                }
+            }
+        }.getOrDefault(false)
+    }
+
     private fun fallback(request: StopNetworkRequest): Boolean {
         val ownerState = AtomicFiles.readIfExists(layout.proxyOwner) ?: return false
         val owner = readKey(ownerState, "owner") ?: return false
-        request.owner?.let { if (it != owner) return false }
+        if (request.owner == null || request.owner != owner) return false
 
         // Parse and verify every identity before sending any signal. This prevents a
         // later indeterminate record from leaving an earlier process silently cleaned.

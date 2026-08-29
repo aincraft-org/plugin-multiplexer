@@ -42,15 +42,20 @@ class ProcessSupervisor(
     }
 
     /** Launch directly and retain the process-provided child stdin stream. */
-    fun launch(command: List<String>, cwd: java.nio.file.Path): OwnedProcess {
+    fun launch(
+        command: List<String>,
+        cwd: java.nio.file.Path,
+        environment: Map<String, String> = emptyMap(),
+    ): OwnedProcess {
         require(command.isNotEmpty()) { "Process command must not be empty" }
         require(java.nio.file.Files.isDirectory(cwd)) { "Process working directory does not exist: $cwd" }
 
-        val process = ProcessBuilder(command)
+        val builder = ProcessBuilder(command)
             .directory(cwd.toFile())
             .redirectOutput(ProcessBuilder.Redirect.INHERIT)
             .redirectError(ProcessBuilder.Redirect.INHERIT)
-            .start()
+        builder.environment().putAll(environment)
+        val process = builder.start()
         return try {
             val identity = identityReader.capture(process, cwd)
             // A lease without every identity component cannot ever be safely

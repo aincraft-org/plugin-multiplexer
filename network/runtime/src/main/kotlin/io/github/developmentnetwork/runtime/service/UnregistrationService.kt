@@ -21,6 +21,7 @@ data class UnregisterExternalRequest(
     val owner: String,
     val targetServer: String = "localhost",
     val controlTimeout: Duration = Duration.ofSeconds(5),
+    val lobbyPort: Int = 30066,
 )
 
 /** Removes only matching external registry metadata; leaves Paper and its files untouched. */
@@ -54,8 +55,7 @@ class UnregistrationService(
                         ?: error("Backend $name disappeared before unregister")
                     require(lockedCurrent == current) { "Backend $name changed during unregister" }
                     require(unregister(name, request.owner)) { "Backend $name is not registered" }
-                    val config = effectiveVelocityConfig(request.targetServer)
-                    velocityWriter.write(layout, config.copy(backendPorts = readRegistrations().associate { it.name.value to it.port }))
+                    val config = effectiveVelocityConfig(request.targetServer, request.lobbyPort)
                     generatedConfig = capture(layout.velocityConfig)
                 }
                 requestReload(request.controlTimeout)
@@ -86,12 +86,13 @@ class UnregistrationService(
         require(response.ok) { response.message.ifBlank { "proxy reload was rejected" } }
     }
 
-    private fun effectiveVelocityConfig(requestTarget: String): VelocityConfig {
+    private fun effectiveVelocityConfig(requestTarget: String, requestedLobbyPort: Int): VelocityConfig {
         val existing = capture(layout.velocityConfig)?.toString(Charsets.UTF_8)
         return VelocityConfig(
             proxyPort = existing?.let { readInt(it, "bind") } ?: 25565,
             targetServer = if (requestTarget == "localhost") existing?.let(::readLobbyTarget) ?: requestTarget else requestTarget,
             onlineMode = existing?.let { readBoolean(it, "online-mode") } ?: false,
+            lobbyPort = existing?.let(::readLobbyPort) ?: requestedLobbyPort,
         )
     }
 
@@ -136,4 +137,8 @@ class UnregistrationService(
     private fun readLobbyTarget(content: String): String? =
         Regex("^lobby\\s*=\\s*\\\"([^:]+):\\d+\\\"", RegexOption.MULTILINE)
             .find(content)?.groupValues?.get(1)
+    private fun readLobbyPort(content: String): Int? =
+        Regex("^lobby\\s*=\\s*\\\"[^:]+:(\\d+)\\\"", RegexOption.MULTILINE)
+            .find(content)?.groupValues?.get(1)?.toIntOrNull()
+
 }

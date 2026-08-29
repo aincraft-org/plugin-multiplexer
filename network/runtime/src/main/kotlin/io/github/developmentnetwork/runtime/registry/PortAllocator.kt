@@ -11,6 +11,7 @@ class PortAllocator {
         explicit: Int? = null,
         occupied: Set<Int> = emptySet(),
         reserved: Set<Int> = emptySet(),
+        occupiedProbe: (Int) -> Boolean = { false },
     ): Int {
         val names = registry.distinct().sortedBy { it.value }
         val index = names.indexOf(name)
@@ -30,7 +31,9 @@ class PortAllocator {
 
         var candidate = DEFAULT_BACKEND_PORT + index
         while (candidate <= MAX_PORT) {
-            if (candidate != PROXY_PORT && candidate != LOBBY_PORT && candidate !in claims) {
+            if (candidate != PROXY_PORT && candidate != LOBBY_PORT &&
+                candidate !in claims && !occupiedProbe(candidate)
+            ) {
                 return candidate
             }
             candidate += 1
@@ -45,6 +48,7 @@ class PortAllocator {
         explicit: Int? = null,
         occupied: Set<Int> = emptySet(),
         reserved: Set<Int> = emptySet(),
+        occupiedProbe: (Int) -> Boolean = { false },
     ): Int = allocate(
         BackendName(name),
         registry.map(::BackendName),
@@ -52,6 +56,7 @@ class PortAllocator {
         explicit,
         occupied,
         reserved,
+        occupiedProbe,
     )
 
     private fun validatePort(port: Int, description: String) {

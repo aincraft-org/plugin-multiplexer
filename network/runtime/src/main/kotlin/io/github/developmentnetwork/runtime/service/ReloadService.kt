@@ -18,6 +18,7 @@ data class ReloadNetworkRequest(
     val proxyPort: Int = 25565,
     val onlineMode: Boolean = false,
     val controlTimeout: Duration = Duration.ofSeconds(5),
+    val lobbyPort: Int = 30066,
 )
 
 class ReloadService(
@@ -81,6 +82,7 @@ class ReloadService(
             proxyPort = existing?.let { readInt(it, "bind") } ?: request.proxyPort,
             targetServer = if (request.targetServer == "localhost") existing?.let(::readLobbyTarget) ?: request.targetServer else request.targetServer,
             onlineMode = existing?.let { readBoolean(it, "online-mode") } ?: request.onlineMode,
+            lobbyPort = existing?.let(::readLobbyPort) ?: request.lobbyPort,
         )
     }
 
@@ -103,4 +105,8 @@ class ReloadService(
     private fun readLobbyTarget(content: String): String? =
         Regex("^lobby\\s*=\\s*\\\"([^:]+):\\d+\\\"", RegexOption.MULTILINE)
             .find(content)?.groupValues?.get(1)
+    private fun readLobbyPort(content: String): Int? =
+        Regex("^lobby\\s*=\\s*\\\"[^:]+:(\\d+)\\\"", RegexOption.MULTILINE)
+            .find(content)?.groupValues?.get(1)?.toIntOrNull()
+
 }

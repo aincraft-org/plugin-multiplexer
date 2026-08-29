@@ -125,9 +125,10 @@ class OfflinePreflight {
         } catch (error: Exception) {
             return PreflightResult.fail(component, "$configPath is invalid: ${error.message ?: error::class.simpleName}")
         }
-        if (toml.value(listOf("online-mode")) != "false") {
-            val detail = toml.value(listOf("online-mode")) ?: "unknown"
-            return PreflightResult.fail(component, "$configPath has $detail online mode; require online-mode = false")
+        val onlineMode = toml.value(listOf("online-mode"))
+        if (onlineMode !in setOf("true", "false")) {
+            val detail = onlineMode ?: "unknown"
+            return PreflightResult.fail(component, "$configPath has $detail online mode; require online-mode = true or false")
         }
         if (toml.value(listOf("player-info-forwarding-mode")) != "modern") {
             return PreflightResult.fail(component, "$configPath does not enable modern forwarding; require player-info-forwarding-mode = \"modern\"")

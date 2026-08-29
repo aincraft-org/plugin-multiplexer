@@ -8,6 +8,8 @@ import io.github.developmentnetwork.runtime.controller.InfrastructureRequest
 import io.github.developmentnetwork.runtime.controller.ReloadNetworkRequest
 import io.github.developmentnetwork.runtime.controller.StopNetworkRequest
 import io.github.developmentnetwork.runtime.controller.RestartBackendRequest
+import io.github.developmentnetwork.runtime.process.ReadinessProbe
+import io.github.developmentnetwork.runtime.process.ProcessSupervisor
 import io.github.developmentnetwork.runtime.service.NetworkStatusRequest
 import io.github.developmentnetwork.runtime.service.RegistrationService
 import io.github.developmentnetwork.runtime.service.ReloadService
@@ -94,6 +96,41 @@ class RegistrationOwnershipTest {
             control.close()
         }
     }
+    @Test
+    fun stopFallbackTerminatesOnlyOwnedManagedBackendWithoutControllerLease() {
+        val base = Files.createTempDirectory("runtime-stop-managed")
+        val layout = RuntimeLayout(base)
+        val workDir = Files.createDirectories(base.resolve("managed"))
+        val port = ServerSocket(0).use { it.localPort }
+        val owned = ProcessSupervisor().launch(
+            FakeJavaServer.command(FakeJavaServer.classPath(), port, "managed"),
+            workDir,
+        )
+        try {
+            ReadinessProbe().await("127.0.0.1", port, Duration.ofSeconds(5))
+            io.github.developmentnetwork.runtime.registry.RegistryStore(layout).register(
+                io.github.developmentnetwork.runtime.model.BackendRegistration(
+                    io.github.developmentnetwork.runtime.model.BackendName("managed"),
+                    port,
+                    "managed-owner",
+                    io.github.developmentnetwork.runtime.model.OwnershipMode.MANAGED,
+                    owned.identity,
+                ),
+            )
+
+            assertEquals(
+                0,
+                StopService(layout).execute(
+                    StopNetworkRequest(owner = "managed-owner", shutdownTimeout = Duration.ofSeconds(5), managedOnly = true),
+                ),
+            )
+            assertFalse(owned.process.isAlive)
+            assertFalse(Files.exists(layout.backend("managed").owner))
+        } finally {
+            if (owned.process.isAlive) owned.process.destroyForcibly()
+        }
+    }
+
 
     @Test
     fun persistedPortWinsAcrossReloadAndRestartRequest() {

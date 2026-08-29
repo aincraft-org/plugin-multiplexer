@@ -64,13 +64,43 @@ abstract class RegisterBackendTask : org.gradle.api.DefaultTask() {
         val backendPort = e.networkBackendPort.orNull ?: throw org.gradle.api.GradleException("registerBackend requires -PnetworkBackendPort=<port>; it attaches an already-running external Paper server")
         port(backendPort, "networkBackendPort")
         val serverDir = e.networkServerDir.orNull?.let(project::file) ?: baseDir(project).resolve("runtime/external/$name")
-        NetworkTaskSupport.run(project, RuntimeCommand.RegisterExternal(RegisterExternalRequest(name, backendPort, owner(project, name), serverDir.toPath(), "localhost", e.networkTargetServer.get(), duration(e.networkControlTimeout.get(), "networkControlTimeout"), duration(e.networkTimeout.get(), "networkTimeout"))), false)
+        NetworkTaskSupport.run(
+            project,
+            RuntimeCommand.RegisterExternal(
+                RegisterExternalRequest(
+                    name = name,
+                    port = backendPort,
+                    owner = owner(project, name),
+                    serverDir = serverDir.toPath(),
+                    targetServer = e.networkTargetServer.get(),
+                    controlTimeout = duration(e.networkControlTimeout.get(), "networkControlTimeout"),
+                    readinessTimeout = duration(e.networkTimeout.get(), "networkTimeout"),
+                    lobbyPort = port(e.networkLobbyPort.get(), "networkLobbyPort"),
+                ),
+            ),
+            false,
+        )
     }
 }
-
 @DisableCachingByDefault(because = "Network tasks mutate shared network registration state")
 abstract class UnregisterBackendTask : org.gradle.api.DefaultTask() {
-    @TaskAction fun unregisterBackend() { val e = extension(project); val name = backendName(project); NetworkTaskSupport.run(project, RuntimeCommand.UnregisterExternal(UnregisterExternalRequest(name, owner(project, name), e.networkTargetServer.get(), duration(e.networkControlTimeout.get(), "networkControlTimeout"))), false) }
+    @TaskAction fun unregisterBackend() {
+        val e = extension(project)
+        val name = backendName(project)
+        NetworkTaskSupport.run(
+            project,
+            RuntimeCommand.UnregisterExternal(
+                UnregisterExternalRequest(
+                    name = name,
+                    owner = owner(project, name),
+                    targetServer = e.networkTargetServer.get(),
+                    controlTimeout = duration(e.networkControlTimeout.get(), "networkControlTimeout"),
+                    lobbyPort = port(e.networkLobbyPort.get(), "networkLobbyPort"),
+                ),
+            ),
+            false,
+        )
+    }
 }
 
 @DisableCachingByDefault(because = "Network tasks start and own an external Paper process")
@@ -78,7 +108,7 @@ abstract class RunBackendTask : org.gradle.api.DefaultTask() {
     @TaskAction fun runBackend() {
         val e = extension(project); val name = backendName(project); val jar = configuredJar(project); val workDir = baseDir(project).resolve("runtime/auto/$name")
         val requestedPort = e.networkBackendPort.orNull?.let { port(it, "networkBackendPort") }
-        NetworkTaskSupport.run(project, RuntimeCommand.ServeBackend(ManagedBackendRequest(name, managedOwner(project, name), requestedPort, workDir.toPath(), pluginJar = jar.toPath(), readinessTimeout = duration(e.networkTimeout.get(), "networkTimeout"), shutdownTimeout = duration(e.networkShutdownTimeout.get(), "networkShutdownTimeout"), devUsers = users(e))), true)
+        NetworkTaskSupport.run(project, RuntimeCommand.ServeBackend(ManagedBackendRequest(name, managedOwner(project, name), requestedPort, workDir.toPath(), pluginJar = jar.toPath(), readinessTimeout = duration(e.networkTimeout.get(), "networkTimeout"), shutdownTimeout = duration(e.networkShutdownTimeout.get(), "networkShutdownTimeout"), devUsers = users(e), proxyPort = port(e.networkProxyPort.get(), "networkProxyPort", true), lobbyPort = port(e.networkLobbyPort.get(), "networkLobbyPort"))), true)
     }
 }
 
@@ -95,12 +125,40 @@ abstract class RunNetworkTask : org.gradle.api.DefaultTask() {
 
 @DisableCachingByDefault(because = "Network tasks stop external services")
 abstract class StopNetworkTask : org.gradle.api.DefaultTask() {
-    @TaskAction fun stopNetwork() { val e = extension(project); NetworkTaskSupport.run(project, RuntimeCommand.StopNetwork(StopNetworkRequest(e.networkRegistrationOwner.orNull?.trim()?.takeIf(String::isNotEmpty), duration(e.networkControlTimeout.get(), "networkControlTimeout"), duration(e.networkShutdownTimeout.get(), "networkShutdownTimeout"))), false) }
+    @TaskAction fun stopNetwork() {
+        val e = extension(project)
+        NetworkTaskSupport.run(
+            project,
+            RuntimeCommand.StopNetwork(
+                StopNetworkRequest(
+                    owner(project, project.name),
+                    duration(e.networkControlTimeout.get(), "networkControlTimeout"),
+                    duration(e.networkShutdownTimeout.get(), "networkShutdownTimeout"),
+                ),
+            ),
+            false,
+        )
+    }
 }
 
 @DisableCachingByDefault(because = "Network tasks mutate proxy configuration")
 abstract class ReloadNetworkTask : org.gradle.api.DefaultTask() {
-    @TaskAction fun reloadNetwork() { val e = extension(project); NetworkTaskSupport.run(project, RuntimeCommand.ReloadNetwork(ReloadNetworkRequest(e.networkTargetServer.get(), port(e.networkProxyPort.get(), "networkProxyPort", true), e.networkOnlineMode.get(), duration(e.networkControlTimeout.get(), "networkControlTimeout"))), false) }
+    @TaskAction fun reloadNetwork() {
+        val e = extension(project)
+        NetworkTaskSupport.run(
+            project,
+            RuntimeCommand.ReloadNetwork(
+                ReloadNetworkRequest(
+                    targetServer = e.networkTargetServer.get(),
+                    proxyPort = port(e.networkProxyPort.get(), "networkProxyPort", true),
+                    onlineMode = e.networkOnlineMode.get(),
+                    controlTimeout = duration(e.networkControlTimeout.get(), "networkControlTimeout"),
+                    lobbyPort = port(e.networkLobbyPort.get(), "networkLobbyPort"),
+                ),
+            ),
+            false,
+        )
+    }
 }
 
 @DisableCachingByDefault(because = "Network tasks restart an external Paper process")

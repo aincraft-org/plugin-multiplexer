@@ -18,6 +18,7 @@ data class VelocityConfig(
     /** Optional explicit/persisted backend ports keyed by validated backend name text. */
     val backendPorts: Map<String, Int> = emptyMap(),
     val forwardingSecret: String = SharedForwardingSecret.VALUE,
+    val lobbyPort: Int = 30066,
 )
 
 /** Writes the one canonical Velocity configuration used by boot and reload. */
@@ -26,7 +27,9 @@ class VelocityConfigWriter {
         require(config.forwardingSecret == SharedForwardingSecret.VALUE) {
             "Velocity forwarding secret must be the shared development secret"
         }
-        require(config.proxyPort in 0..65535) { "Proxy port must be in 0..65535: ${config.proxyPort}" }
+        require(config.proxyPort in 1024..65535) { "Proxy port must be in 1024..65535: ${config.proxyPort}" }
+        require(config.lobbyPort in 1024..65535) { "Lobby port must be in 1024..65535: ${config.lobbyPort}" }
+        require(config.proxyPort != config.lobbyPort) { "Proxy and lobby ports must differ" }
         require(config.targetServer.isNotBlank() && '\n' !in config.targetServer && '\r' !in config.targetServer) {
             "Target server must be a non-blank single-line host"
         }
@@ -82,7 +85,7 @@ class VelocityConfigWriter {
             appendLine("auto-connect-upstreams = true")
             appendLine()
             appendLine("[servers]")
-            appendLine("lobby = \"$target:30066\"")
+            appendLine("lobby = \"$target:${config.lobbyPort}\"")
             ports.forEach { (name, port) -> appendLine("$name = \"$target:$port\"") }
             append("try = [\"lobby\"")
             ports.forEach { (name, _) -> append(", \"$name\"") }

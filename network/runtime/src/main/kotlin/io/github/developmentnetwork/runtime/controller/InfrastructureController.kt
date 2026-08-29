@@ -19,6 +19,8 @@ import io.github.developmentnetwork.runtime.process.ReadinessProbe
 import io.github.developmentnetwork.runtime.registry.PortAllocator
 import io.github.developmentnetwork.runtime.registry.RegistryStore
 import io.github.developmentnetwork.runtime.state.AtomicFiles
+import io.github.developmentnetwork.runtime.service.ReloadNetworkRequest
+import io.github.developmentnetwork.runtime.service.ReloadService
 import io.github.developmentnetwork.runtime.state.RuntimeLayout
 import java.io.Closeable
 import java.net.ServerSocket
@@ -228,6 +230,7 @@ class InfrastructureController(
                     explicit = request.backendPort,
                     occupied = registrations.filter { it.name != name }.map { it.port }.toSet(),
                     reserved = setOf(request.proxyPort, request.lobbyPort),
+                    occupiedProbe = ::isPortOccupied,
                 ).also { ports[name.value] = it }
             }
             if (mode == InfrastructureMode.FULL && backendName != null && resolvedPort != null) {
@@ -247,7 +250,16 @@ class InfrastructureController(
 
         var control: Closeable? = null
         return try {
-            velocityWriter.write(layout, VelocityConfig(request.proxyPort, request.targetServer, request.onlineMode, ports))
+            velocityWriter.write(
+                layout,
+                VelocityConfig(
+                    proxyPort = request.proxyPort,
+                    targetServer = request.targetServer,
+                    onlineMode = request.onlineMode,
+                    backendPorts = ports,
+                    lobbyPort = request.lobbyPort,
+                ),
+            )
             check(preflight.verifyProxy(layout.velocityConfig, owned = true).success) {
                 preflight.verifyProxy(layout.velocityConfig, owned = true).message
             }
@@ -303,7 +315,13 @@ class InfrastructureController(
                         val current = RegistryStore(layout).readRegistrations().associate { it.name.value to it.port }
                         velocityWriter.write(
                             layout,
-                            VelocityConfig(request.proxyPort, request.targetServer, request.onlineMode, current),
+                            VelocityConfig(
+                                proxyPort = request.proxyPort,
+                                targetServer = request.targetServer,
+                                onlineMode = request.onlineMode,
+                                backendPorts = current,
+                                lobbyPort = request.lobbyPort,
+                            ),
                         )
                         val proxy = proxyProcess ?: error("Proxy process is not running")
                         requireLive(proxy, "proxy")
@@ -318,7 +336,11 @@ class InfrastructureController(
                 }
             }
 
-            proxyProcess = processSupervisor.launch(proxyCommand, layout.base)
+            proxyProcess = processSupervisor.launch(
+                proxyCommand,
+                layout.base,
+                environment = mapOf("DEV_USERS" to request.devUsers.joinToString(" ")),
+            )
             persistProxyProcess(proxyProcess!!.identity)
             awaitReadiness(
                 proxyProcess!!,
@@ -441,8 +463,8 @@ class InfrastructureController(
             val reservation = backendReservation
             if (reservation != null) {
                 val current = runCatching { RegistryStore(layout).readRegistration(reservation.name) }.getOrNull()
-                // Remove an unstarted placeholder, or a successfully terminated
-                // process registration, only when the complete claim still matches.
+                // Remove an unstarted placeholder, or a process registration once
+                // this exact child has exited, only when the complete claim matches.
                 val claimMatches = current?.mode == OwnershipMode.MANAGED &&
                     current.owner == reservation.owner &&
                     current.port == reservation.port
@@ -450,7 +472,10 @@ class InfrastructureController(
                 val terminatedProcess = backend != null &&
                     backendResult?.success == true &&
                     current?.process == backend.identity
-                if (claimMatches && (placeholder || terminatedProcess)) {
+                val naturallyExitedProcess = backend != null &&
+                    !backend.process.isAlive &&
+                    current?.process == backend.identity
+                if (claimMatches && (placeholder || terminatedProcess || naturallyExitedProcess)) {
                     runCatching { RegistryStore(layout).unregister(reservation.name, reservation.owner) }
                 }
             }
@@ -592,6 +617,9 @@ class InfrastructureController(
         }
     }
 
+    private fun isPortOccupied(port: Int): Boolean =
+        runCatching { ServerSocket(port).use { false } }.getOrDefault(true)
+
     private fun identityIsLive(identity: ProcessIdentity): Boolean =
         processSupervisor.identityReader.matches(identity)
 
@@ -695,6 +723,8 @@ data class ManagedBackendRequest(
     val readinessTimeout: Duration = Duration.ofMinutes(4),
     val shutdownTimeout: Duration = Duration.ofSeconds(30),
     val devUsers: List<String> = listOf("dev"),
+    val proxyPort: Int = PortAllocator.PROXY_PORT,
+    val lobbyPort: Int = PortAllocator.LOBBY_PORT,
 )
 
 class ManagedBackendController(
@@ -763,7 +793,9 @@ class ManagedBackendController(
                 name,
                 (registrations.map { it.name } + name).distinct(),
                 explicit = request.port,
-                occupied = registrations.filter { it.name != name }.map { it.port }.toSet() + setOf(PortAllocator.PROXY_PORT, PortAllocator.LOBBY_PORT),
+                occupied = registrations.filter { it.name != name }.map { it.port }.toSet(),
+                reserved = setOf(request.proxyPort, request.lobbyPort),
+                occupiedProbe = ::isPortOccupied,
             )
             AtomicFiles.write(startingMarker, "${ProcessHandle.current().pid()}\n${request.owner}\n")
             if (existing == null) register(BackendRegistration(name, port, request.owner, OwnershipMode.MANAGED, null))
@@ -798,6 +830,7 @@ class ManagedBackendController(
             registry.register(BackendRegistration(name, port, request.owner, OwnershipMode.MANAGED, process.identity))
             awaitReadiness(process, request.readinessHost, port, request.readinessTimeout)
             AtomicFiles.write(state.ready, "ready\n")
+            check(refreshProxy(request)) { "managed backend registration could not reload the active proxy" }
             while (process.process.isAlive && !stopRequested.get()) awaitWake(50)
             0
         } catch (_: InterruptedException) {
@@ -837,24 +870,45 @@ class ManagedBackendController(
                 runCatching { processSupervisor.terminate(it, request.shutdownTimeout) }
                     .getOrElse { ProcessSupervisor.TerminationResult.NOT_TERMINATED }
             }
-            if (result?.success == true) Files.deleteIfExists(layout.backend(name).ready)
+            val processExited = process?.let { !it.process.isAlive } == true
+            if (result?.success == true || processExited) Files.deleteIfExists(layout.backend(name).ready)
             val claim = reservation ?: return
             // A stop interrupt is consumed above and must not interrupt the
             // registration lock; any unproven termination still preserves state.
             Thread.interrupted()
             val current = runCatching { RegistryStore(layout).readRegistration(name) }.getOrNull()
-            if (current?.mode == OwnershipMode.MANAGED &&
+            val claimMatches = current?.mode == OwnershipMode.MANAGED &&
                 current.owner == claim.owner &&
-                current.port == claim.port &&
-                ((process != null && result?.success == true && current.process == process.identity) ||
-                    (process == null && current.process == null))
-            ) {
-                runCatching { RegistryStore(layout).unregister(name, claim.owner) }
+                current.port == claim.port
+            val removable = (process != null && current?.process == process.identity && processExited) ||
+                (process == null && current?.process == null)
+            if (claimMatches && removable) {
+                val removed = runCatching { RegistryStore(layout).unregister(name, claim.owner) }.getOrDefault(false)
+                if (removed) runCatching { refreshProxy(request) }
             }
         } finally {
             if (cleanupInterrupted) Thread.currentThread().interrupt()
         }
     }
+
+    /**
+     * A managed backend may be attached to an already-running shared proxy.
+     * Keep registry/config/reload in the existing serialized service path.
+     */
+    private fun refreshProxy(request: ManagedBackendRequest): Boolean {
+        if (!Files.exists(layout.proxyReady)) return true
+        return ReloadService(layout).execute(
+            ReloadNetworkRequest(
+                proxyPort = request.proxyPort,
+                controlTimeout = request.shutdownTimeout,
+                lobbyPort = request.lobbyPort,
+            ),
+        ) == 0
+    }
+
+
+    private fun isPortOccupied(port: Int): Boolean =
+        runCatching { ServerSocket(port).use { false } }.getOrDefault(true)
 
     private fun awaitReadiness(process: OwnedProcess, host: String, port: Int, timeout: Duration) {
         requireLive(process)

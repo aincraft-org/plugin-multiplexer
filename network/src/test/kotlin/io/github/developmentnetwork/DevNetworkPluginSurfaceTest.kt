@@ -4,9 +4,9 @@ import java.nio.file.Files
 import kotlin.io.path.writeText
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
+import org.gradle.testfixtures.ProjectBuilder
 import org.gradle.testkit.runner.GradleRunner
 import org.junit.jupiter.api.Test
-
 class DevNetworkPluginSurfaceTest {
     @Test
     fun `embedded runtime extracts into a clean Gradle user home`() {
@@ -55,6 +55,16 @@ class DevNetworkPluginSurfaceTest {
         }
         assertEquals(9, Regex("(?m)^(runProxy|registerBackend|unregisterBackend|runBackend|runNetwork|stopNetwork|reloadNetwork|restartBackend|networkStatus) - ").findAll(result.output).count())
     }
+    @Test
+    fun networkDevUsersAcceptsLegacyWhitespaceSeparatedValues() {
+        val project = ProjectBuilder.builder().build()
+        project.pluginManager.apply(DevNetworkPlugin::class.java)
+        val extension = project.extensions.getByType(DevelopmentNetworkExtension::class.java)
+        extension.networkDevUsers.set("alice bob,carol")
+
+        assertEquals(listOf("alice", "bob", "carol"), users(extension))
+    }
+
 
     private fun consumerProject() = Files.createTempDirectory("network-plugin-surface").also { dir ->
         dir.resolve("settings.gradle.kts").writeText(

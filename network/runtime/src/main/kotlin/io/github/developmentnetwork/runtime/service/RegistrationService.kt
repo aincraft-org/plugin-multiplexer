@@ -27,6 +27,7 @@ data class RegisterExternalRequest(
     val targetServer: String = "localhost",
     val controlTimeout: Duration = Duration.ofSeconds(5),
     val readinessTimeout: Duration = Duration.ofSeconds(5),
+    val lobbyPort: Int = 30066,
 )
 
 /** Registers metadata only: no external configuration or process is ever changed. */
@@ -65,8 +66,7 @@ class RegistrationService(
                 registry.withRegistrationTransition {
                     register(candidate)
                     Files.createDirectories(layout.runtimeDir)
-                    AtomicFiles.write(layout.backend(name).ready, "ready\n")
-                    val config = effectiveVelocityConfig(request.targetServer)
+                    val config = effectiveVelocityConfig(request.targetServer, request.lobbyPort)
                     velocityWriter.write(layout, config.copy(backendPorts = readRegistrations().associate { it.name.value to it.port }))
                     generatedConfig = capture(layout.velocityConfig)
                 }
@@ -97,16 +97,17 @@ class RegistrationService(
         require(response.ok) { response.message.ifBlank { "proxy reload was rejected" } }
     }
 
-    /** Preserve an existing custom proxy bind/target/online mode during metadata-only changes. */
-    private fun effectiveVelocityConfig(requestTarget: String): VelocityConfig {
+    private fun effectiveVelocityConfig(requestTarget: String, requestedLobbyPort: Int): VelocityConfig {
         val existing = capture(layout.velocityConfig)?.toString(Charsets.UTF_8)
         val existingPort = existing?.let { readInt(it, "bind") }
         val existingTarget = existing?.let { readLobbyTarget(it) }
         val existingOnline = existing?.let { readBoolean(it, "online-mode") }
+        val existingLobbyPort = existing?.let { readLobbyPort(it) }
         return VelocityConfig(
             proxyPort = existingPort ?: 25565,
             targetServer = if (requestTarget == "localhost" && existingTarget != null) existingTarget else requestTarget,
             onlineMode = existingOnline ?: false,
+            lobbyPort = existingLobbyPort ?: requestedLobbyPort,
         )
     }
 
@@ -155,6 +156,9 @@ class RegistrationService(
         Regex("^lobby\\s*=\\s*\\\"([^:]+):\\d+\\\"", RegexOption.MULTILINE)
             .find(content)?.groupValues?.get(1)
 
+    private fun readLobbyPort(content: String): Int? =
+        Regex("^lobby\\s*=\\s*\\\"[^:]+:(\\d+)\\\"", RegexOption.MULTILINE)
+            .find(content)?.groupValues?.get(1)?.toIntOrNull()
     private fun fail(error: Exception): Int {
         System.err.println("external registration: ${error.message ?: error::class.simpleName}")
         return 1

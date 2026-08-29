@@ -6,6 +6,9 @@ import io.github.developmentnetwork.runtime.controller.InfrastructureMode
 import io.github.developmentnetwork.runtime.controller.InfrastructureRequest
 import io.github.developmentnetwork.runtime.controller.ManagedBackendController
 import io.github.developmentnetwork.runtime.controller.ManagedBackendRequest
+import io.github.developmentnetwork.runtime.controller.ControlCommand
+import io.github.developmentnetwork.runtime.controller.ControlServer
+import io.github.developmentnetwork.runtime.controller.ControlResponse
 import io.github.developmentnetwork.runtime.model.OwnershipMode
 import io.github.developmentnetwork.runtime.process.ProcessSupervisor
 import io.github.developmentnetwork.runtime.state.RuntimeLayout
@@ -18,6 +21,7 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.time.Duration
 import kotlin.concurrent.thread
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -200,6 +204,81 @@ class ControllerLifecycleTest {
         running.join(10_000)
         assertFalse(running.isAlive)
         assertFalse(Files.exists(layout.backend("full").pid))
+    }
+
+    @Test
+    fun managedBackendRefreshesSharedProxyOnRegistrationAndCleanup() {
+        val base = Files.createTempDirectory("runtime-managed-reload")
+        val layout = RuntimeLayout(base)
+        val ports = freePorts(3)
+        val reloads = AtomicInteger()
+        Files.createDirectories(layout.runtimeDir)
+        AtomicFiles.write(layout.proxyReady, "ready\n")
+        val control = ControlServer().serve(layout.proxyControl, ControlServer.generateToken()) { command ->
+            when (command) {
+                ControlCommand.Reload -> {
+                    reloads.incrementAndGet()
+                    ControlResponse.success("reloaded")
+                }
+                ControlCommand.Shutdown -> ControlResponse.success("stopped")
+            }
+        }
+        val request = ManagedBackendRequest(
+            name = "reloadable",
+            owner = "reload-owner",
+            port = ports[2],
+            workDir = base.resolve("managed"),
+            paperCommand = FakeJavaServer.command(FakeJavaServer.classPath(), ports[2], "paper"),
+            artifacts = FakeArtifacts,
+            readinessTimeout = Duration.ofSeconds(5),
+            proxyPort = ports[0],
+            lobbyPort = ports[1],
+        )
+        val controller = ManagedBackendController(layout)
+        val running = thread(start = true) { controller.run(request) }
+        try {
+            val deadline = System.nanoTime() + 10_000_000_000L
+            while ((!Files.exists(layout.velocityConfig) ||
+                    !Files.readString(layout.velocityConfig).contains("reloadable =")) &&
+                System.nanoTime() < deadline
+            ) Thread.sleep(10)
+            val config = AtomicFiles.readIfExists(layout.velocityConfig).orEmpty()
+            assertTrue(config.contains("reloadable ="), config)
+            assertTrue(reloads.get() >= 1)
+            controller.stop(request)
+            running.join(10_000)
+        } finally {
+            control.close()
+            if (running.isAlive) controller.stop(request)
+            running.join(10_000)
+        }
+        assertFalse(Files.readString(layout.velocityConfig).contains("reloadable ="))
+        assertTrue(reloads.get() >= 2)
+    }
+
+    @Test
+    fun managedNaturalExitRemovesOnlyItsOwnedRegistration() {
+        val base = Files.createTempDirectory("runtime-managed-natural-exit")
+        val layout = RuntimeLayout(base)
+        val port = freePort()
+        val request = ManagedBackendRequest(
+            name = "natural",
+            owner = "natural-owner",
+            port = port,
+            workDir = base.resolve("managed"),
+            paperCommand = FakeJavaServer.command(
+                FakeJavaServer.classPath(),
+                port,
+                "paper",
+                "--exit-after=1000",
+            ),
+            artifacts = FakeArtifacts,
+            readinessTimeout = Duration.ofSeconds(5),
+        )
+
+        assertEquals(0, ManagedBackendController(layout).run(request))
+        assertFalse(Files.exists(layout.backend("natural").owner))
+        assertFalse(Files.exists(layout.backend("natural").port))
     }
 
     private fun await(path: Path) {
