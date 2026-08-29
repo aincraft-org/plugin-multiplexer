@@ -100,6 +100,7 @@ object NetworkTaskSupport {
                 request.port?.let { args += "--backend-port=$it" }
                 args += "--backend-dir=${request.workDir}"
                 args += "--owner=${request.owner}"
+                request.proxyOwner?.let { args += "--proxy-owner=$it" }
                 args += "--proxy-port=${request.proxyPort}"
                 args += "--lobby-port=${request.lobbyPort}"
                 args += "--timeout=${request.readinessTimeout.seconds}"

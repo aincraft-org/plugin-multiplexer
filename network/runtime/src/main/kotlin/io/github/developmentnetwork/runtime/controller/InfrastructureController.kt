@@ -725,6 +725,7 @@ data class ManagedBackendRequest(
     val devUsers: List<String> = listOf("dev"),
     val proxyPort: Int = PortAllocator.PROXY_PORT,
     val lobbyPort: Int = PortAllocator.LOBBY_PORT,
+    val proxyOwner: String? = null,
 )
 
 class ManagedBackendController(
@@ -897,6 +898,7 @@ class ManagedBackendController(
      */
     private fun refreshProxy(request: ManagedBackendRequest): Boolean {
         if (!Files.exists(layout.proxyReady)) return true
+        if (!ownsSharedProxy(request)) return false
         return ReloadService(layout).execute(
             ReloadNetworkRequest(
                 proxyPort = request.proxyPort,
@@ -904,6 +906,18 @@ class ManagedBackendController(
                 lobbyPort = request.lobbyPort,
             ),
         ) == 0
+    }
+
+    private fun ownsSharedProxy(request: ManagedBackendRequest): Boolean {
+        val expectedOwner = request.proxyOwner?.trim()?.takeIf { it.isNotEmpty() } ?: return false
+        val state = AtomicFiles.readIfExists(layout.proxyOwner) ?: return false
+        val values = state.lineSequence()
+            .mapNotNull { line ->
+                val separator = line.indexOf('=')
+                if (separator <= 0) null else line.substring(0, separator) to line.substring(separator + 1)
+            }
+            .toMap()
+        return values["owner"] == expectedOwner && values["mode"] == "infrastructure"
     }
 
 

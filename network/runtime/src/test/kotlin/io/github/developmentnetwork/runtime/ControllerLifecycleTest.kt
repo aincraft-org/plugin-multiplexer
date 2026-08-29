@@ -214,6 +214,7 @@ class ControllerLifecycleTest {
         val reloads = AtomicInteger()
         Files.createDirectories(layout.runtimeDir)
         AtomicFiles.write(layout.proxyReady, "ready\n")
+        AtomicFiles.write(layout.proxyOwner, "owner=proxy-owner\nmode=infrastructure\n")
         val control = ControlServer().serve(layout.proxyControl, ControlServer.generateToken()) { command ->
             when (command) {
                 ControlCommand.Reload -> {
@@ -233,6 +234,7 @@ class ControllerLifecycleTest {
             readinessTimeout = Duration.ofSeconds(5),
             proxyPort = ports[0],
             lobbyPort = ports[1],
+            proxyOwner = "proxy-owner",
         )
         val controller = ManagedBackendController(layout)
         val running = thread(start = true) { controller.run(request) }
@@ -254,6 +256,32 @@ class ControllerLifecycleTest {
         }
         assertFalse(Files.readString(layout.velocityConfig).contains("reloadable ="))
         assertTrue(reloads.get() >= 2)
+    }
+
+    @Test
+    fun managedBackendFailsClosedForUnrecognizedSharedProxy() {
+        val base = Files.createTempDirectory("runtime-managed-foreign-proxy")
+        val layout = RuntimeLayout(base)
+        val port = freePort()
+        Files.createDirectories(layout.runtimeDir)
+        AtomicFiles.write(layout.proxyReady, "ready\n")
+        AtomicFiles.write(layout.proxyOwner, "owner=foreign-owner\nmode=full\n")
+        AtomicFiles.write(layout.velocityConfig, "foreign = localhost:25565\n")
+        val request = ManagedBackendRequest(
+            name = "foreign",
+            owner = "managed-owner",
+            port = port,
+            workDir = base.resolve("managed"),
+            paperCommand = FakeJavaServer.command(FakeJavaServer.classPath(), port, "paper"),
+            artifacts = FakeArtifacts,
+            readinessTimeout = Duration.ofSeconds(5),
+            proxyOwner = "proxy-owner",
+        )
+
+        assertEquals(1, ManagedBackendController(layout).run(request))
+        assertEquals("foreign = localhost:25565\n", Files.readString(layout.velocityConfig))
+        assertFalse(Files.exists(layout.backend("foreign").owner))
+        assertFalse(Files.exists(layout.backend("foreign").port))
     }
 
     @Test

@@ -140,6 +140,7 @@ fun parseRuntimeCommand(request: RuntimeRequest): RuntimeCommand {
             val backendPort = optionalPort(settings, "backend-port", "port")
             val workDir = settings["backend-dir"]?.let(Path::of)
                 ?: base.resolve("runtime/auto/${backendName.value}")
+            val proxyOwner = settings["proxy-owner"]?.also(::validateOwner)
             return RuntimeCommand.ServeBackend(
                 ManagedBackendRequest(
                     name = backendName.value,
@@ -152,6 +153,7 @@ fun parseRuntimeCommand(request: RuntimeRequest): RuntimeCommand {
                     devUsers = users(settings),
                     proxyPort = proxyPort,
                     lobbyPort = lobbyPort,
+                    proxyOwner = proxyOwner,
                 ),
             )
         }
@@ -278,7 +280,7 @@ private val PROXY_KEYS = setOf(
 private val FULL_KEYS = PROXY_KEYS + setOf("name", "backend", "network-backend", "backend-port", "port", "backend-dir", "plugin-jar")
 private val BACKEND_KEYS = setOf(
     "base", "name", "backend", "network-backend", "backend-port", "port", "backend-dir", "plugin-jar", "owner",
-    "registration-owner", "proxy-port", "lobby-port", "timeout", "shutdown-timeout", "dev-users",
+    "registration-owner", "proxy-owner", "proxy-port", "lobby-port", "timeout", "shutdown-timeout", "dev-users",
 )
 private val EXTERNAL_REGISTER_KEYS = setOf(
     "base", "name", "backend", "network-backend", "port", "registration-owner", "owner", "server-dir",
