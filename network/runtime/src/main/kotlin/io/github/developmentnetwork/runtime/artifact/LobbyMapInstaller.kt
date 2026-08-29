@@ -12,11 +12,12 @@ import java.nio.file.Files
 import java.nio.file.LinkOption.NOFOLLOW_LINKS
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption.ATOMIC_MOVE
-import java.nio.file.StandardCopyOption.REPLACE_EXISTING
 import java.nio.file.StandardOpenOption.CREATE
 import java.nio.file.StandardOpenOption.WRITE
 import java.nio.file.attribute.BasicFileAttributes
-import java.util.UUID
+import java.nio.file.attribute.PosixFileAttributeView
+import java.nio.file.attribute.PosixFilePermission
+import java.nio.file.attribute.PosixFilePermissions
 import java.util.zip.ZipEntry
 import java.util.zip.ZipException
 import java.util.zip.ZipFile
@@ -56,20 +57,20 @@ class LobbyMapInstaller(private val fetcher: ArtifactFetcher) {
     private fun installLocked(workDir: Path, options: LobbyMapOptions): MapInstallResult {
         validateOptions(options)
         Files.createDirectories(workDir)
+        val selectedMode = mode(options)
         val world = workDir.resolve("world")
         val existing = existingWorldState(world)
         if (existing == ExistingWorld.COMPLETE) {
-            return MapInstallResult(installed = false, skipped = true, world = world, mode = mode(options))
+            return MapInstallResult(installed = false, skipped = true, world = world, mode = selectedMode)
         }
 
-        val selectedMode = mode(options)
         if (selectedMode == MapInstallMode.NONE) {
             return MapInstallResult(installed = false, skipped = false, world = world, mode = selectedMode)
         }
         if (existing == ExistingWorld.INCOMPLETE) {
             throw IllegalArgumentException("Refusing to replace incomplete world directory; remove $world and retry")
         }
-
+        requirePublicationCapabilities(workDir)
         val archive = workDir.resolve(".world-${java.util.UUID.randomUUID()}.zip")
         var checksum: String? = null
         try {
@@ -99,16 +100,21 @@ class LobbyMapInstaller(private val fetcher: ArtifactFetcher) {
         var reservation: WorldReservation? = null
         try {
             val source = validateAndExtract(archive, extraction)
-            // Claim the destination itself before the final publication check.
-            // CREATE_DIRECTORY makes a concurrent creator either win before this
-            // point (in which case it is preserved) or find our empty reservation.
-            // Readers see an empty world directory until the atomic move.
+            // Reserve world as a POSIX mode-000 directory. The inaccessible
+            // reservation is created before publication, so public readers
+            // and ordinary creators cannot observe or modify an incomplete
+            // world. Directory identity and mode are checked immediately
+            // before the atomic publication. The ATOMIC_MOVE-only operation
+            // can therefore replace only this installer's reservation;
+            // providers that cannot create the reservation or perform the
+            // atomic move fail closed in requirePublicationCapabilities.
             if (existingWorldState(world) != ExistingWorld.ABSENT) return false
             reservation = reserveWorld(world) ?: return false
-            requireReservation(world, reservation)
+            if (!ownsReservation(world, reservation)) return false
             beforePublication?.invoke()
+            if (!ownsReservation(world, reservation)) return false
             try {
-                Files.move(source, world, ATOMIC_MOVE, REPLACE_EXISTING)
+                Files.move(source, world, ATOMIC_MOVE)
             } catch (_: DirectoryNotEmptyException) {
                 // A creator populated the reserved directory after the final
                 // check; preserve that incomplete world and do not publish ours.
@@ -120,7 +126,7 @@ class LobbyMapInstaller(private val fetcher: ArtifactFetcher) {
                 )
             } catch (alreadyExists: FileAlreadyExistsException) {
                 throw IOException(
-                    "Cannot publish lobby world: filesystem refused replacement of its reservation ($world)",
+                    "Cannot publish lobby world: filesystem refused atomic publication over its inaccessible reservation ($world)",
                     alreadyExists,
                 )
             } catch (error: FileSystemException) {
@@ -269,12 +275,18 @@ class LobbyMapInstaller(private val fetcher: ArtifactFetcher) {
     }
     private fun reserveWorld(world: Path): WorldReservation? {
         try {
-            Files.createDirectory(world)
+            Files.createDirectory(world, INACCESSIBLE_DIRECTORY)
         } catch (_: FileAlreadyExistsException) {
             return null
         }
 
         return try {
+            val permissions = Files.getPosixFilePermissions(world, NOFOLLOW_LINKS)
+            if (permissions.isNotEmpty()) {
+                throw IOException(
+                    "Cannot reserve lobby world: provider did not create an inaccessible reservation ($world)",
+                )
+            }
             val fileKey = Files.readAttributes(world, BasicFileAttributes::class.java, NOFOLLOW_LINKS).fileKey()
                 ?: throw IOException("Cannot reserve lobby world: filesystem does not expose directory identity ($world)")
             WorldReservation(fileKey)
@@ -288,11 +300,47 @@ class LobbyMapInstaller(private val fetcher: ArtifactFetcher) {
         }
     }
 
-    private fun requireReservation(world: Path, reservation: WorldReservation) {
-        if (!ownsReservation(world, reservation)) {
-            throw IOException("Lobby world reservation was lost before atomic publication: $world")
+    private fun requirePublicationCapabilities(workDir: Path) {
+        try {
+            if (Files.getFileAttributeView(workDir, PosixFileAttributeView::class.java, NOFOLLOW_LINKS) == null) {
+                throw IOException("Cannot install lobby world safely: filesystem provider has no POSIX permission view")
+            }
+            val probe = Files.createTempDirectory(workDir, ".world-publication-probe-")
+            try {
+                val source = Files.createDirectory(probe.resolve("source"))
+                val target = Files.createDirectory(probe.resolve("target"), INACCESSIBLE_DIRECTORY)
+                if (Files.getPosixFilePermissions(target, NOFOLLOW_LINKS).isNotEmpty()) {
+                    throw IOException(
+                        "Cannot install lobby world safely: provider cannot create inaccessible reservations",
+                    )
+                }
+                Files.move(source, target, ATOMIC_MOVE)
+                if (Files.exists(source) || !Files.isDirectory(target, NOFOLLOW_LINKS)) {
+                    throw IOException(
+                        "Cannot install lobby world safely: provider did not atomically publish a directory",
+                    )
+                }
+            } finally {
+                deleteTree(probe)
+            }
+        } catch (error: AtomicMoveNotSupportedException) {
+            throw IOException(
+                "Cannot install lobby world safely: filesystem provider does not support atomic directory publication",
+                error,
+            )
+        } catch (error: UnsupportedOperationException) {
+            throw IOException(
+                "Cannot install lobby world safely: filesystem provider cannot enforce inaccessible reservations",
+                error,
+            )
+        } catch (error: FileSystemException) {
+            throw IOException(
+                "Cannot install lobby world safely: filesystem provider cannot atomically publish a directory",
+                error,
+            )
         }
     }
+
 
     private fun releaseReservation(world: Path, reservation: WorldReservation) {
         if (ownsReservation(world, reservation)) {
@@ -305,7 +353,7 @@ class LobbyMapInstaller(private val fetcher: ArtifactFetcher) {
         return try {
             val attributes = Files.readAttributes(world, BasicFileAttributes::class.java, NOFOLLOW_LINKS)
             attributes.fileKey() == reservation.fileKey &&
-                Files.list(world).use { stream -> !stream.findAny().isPresent }
+                Files.getPosixFilePermissions(world, NOFOLLOW_LINKS).isEmpty()
         } catch (_: IOException) {
             false
         }
@@ -373,6 +421,9 @@ class LobbyMapInstaller(private val fetcher: ArtifactFetcher) {
     private data class WorldReservation(val fileKey: Any)
 
     private companion object {
+        val INACCESSIBLE_DIRECTORY = PosixFilePermissions.asFileAttribute(
+            emptySet<PosixFilePermission>(),
+        )
         const val EOCD_SIGNATURE = 0x06054b50L
         const val CENTRAL_SIGNATURE = 0x02014b50L
         const val CENTRAL_HEADER_SIZE = 46

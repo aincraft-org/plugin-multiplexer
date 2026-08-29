@@ -6,9 +6,12 @@ import io.github.developmentnetwork.runtime.artifact.LobbyMapInstaller
 import io.github.developmentnetwork.runtime.artifact.LobbyMapOptions
 import io.github.developmentnetwork.runtime.artifact.MapInstallResult
 import java.io.ByteArrayOutputStream
+import java.io.IOException
 import java.net.InetSocketAddress
 import java.net.URI
+import java.nio.file.FileSystems
 import java.nio.file.Files
+import java.nio.file.LinkOption.NOFOLLOW_LINKS
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 import kotlin.test.Test
@@ -227,21 +230,58 @@ class LobbyMapInstallerTest {
         }
     }
     @Test
-    fun creatorAfterFinalReservationCheckCannotCreateEmptyWorldOrObservePartialInstall() {
-        val work = Files.createTempDirectory("final-window-map")
+    fun inaccessibleReservationHidesIncompleteWorldFromReadersAndCreators() {
+        val work = Files.createTempDirectory("inaccessible-map")
         val archive = zip(mapOf("level.dat" to "published", "region/r.0.0.mca" to "region"))
-        val creatorFailure = java.util.concurrent.atomic.AtomicReference<Throwable?>()
+        var readerFailure: Throwable? = null
+        var creatorFailure: Throwable? = null
 
         serve(archive).use { fixture ->
             val installer = LobbyMapInstaller(ArtifactFetcher())
             installer.beforePublication = {
-                assertTrue(Files.isDirectory(work.resolve("world")))
-                assertFalse(Files.exists(work.resolve("world/level.dat")))
+                val world = work.resolve("world")
+                assertTrue(Files.isDirectory(world, NOFOLLOW_LINKS))
+                assertTrue(Files.getPosixFilePermissions(world, NOFOLLOW_LINKS).isEmpty())
                 try {
-                    Files.createDirectories(work.resolve("world"))
-                    Files.writeString(work.resolve("world/creator.txt"), "incomplete")
+                    Files.list(world).use { it.findAny() }
                 } catch (error: Throwable) {
-                    creatorFailure.set(error)
+                    readerFailure = error
+                }
+                try {
+                    Files.writeString(world.resolve("creator.txt"), "incomplete")
+                } catch (error: Throwable) {
+                    creatorFailure = error
+                }
+            }
+            val result = installer.install(
+                work,
+                LobbyMapOptions(staticUrl = fixture.url, staticSha256 = fixture.sha256),
+            )
+
+            assertTrue(result.installed)
+            assertTrue(readerFailure is IOException)
+            assertTrue(creatorFailure is IOException)
+            assertEquals("published", Files.readString(work.resolve("world/level.dat")))
+        }
+        assertNoTemporaryWorldArtifacts(work)
+    }
+
+    @Test
+    fun populatedCreatorAfterFinalReservationCheckIsNeverReplaced() {
+        val work = Files.createTempDirectory("populated-final-window-map")
+        val archive = zip(mapOf("level.dat" to "published", "region/r.0.0.mca" to "region"))
+        var creatorFailure: Throwable? = null
+
+        serve(archive).use { fixture ->
+            val installer = LobbyMapInstaller(ArtifactFetcher())
+            installer.beforePublication = {
+                val world = work.resolve("world")
+                Files.delete(world)
+                Files.createDirectory(world)
+                try {
+                    Files.writeString(world.resolve("creator.txt"), "incomplete")
+                } catch (error: Throwable) {
+                    creatorFailure = error
                 }
             }
             val result = installer.install(
@@ -251,10 +291,62 @@ class LobbyMapInstallerTest {
 
             assertFalse(result.installed)
             assertTrue(result.skipped)
-            assertTrue(creatorFailure.get() == null)
+            assertEquals(null, creatorFailure)
             assertEquals("incomplete", Files.readString(work.resolve("world/creator.txt")))
             assertFalse(Files.exists(work.resolve("world/level.dat")))
         }
+        assertNoTemporaryWorldArtifacts(work)
+    }
+
+    @Test
+    fun emptyCreatorAfterFinalReservationCheckIsNeverReplaced() {
+        val work = Files.createTempDirectory("empty-final-window-map")
+        val archive = zip(mapOf("level.dat" to "published", "region/r.0.0.mca" to "region"))
+        serve(archive).use { fixture ->
+            val installer = LobbyMapInstaller(ArtifactFetcher())
+            installer.beforePublication = {
+                val world = work.resolve("world")
+                Files.delete(world)
+                Files.createDirectory(world)
+            }
+            val result = installer.install(
+                work,
+                LobbyMapOptions(staticUrl = fixture.url, staticSha256 = fixture.sha256),
+            )
+
+            assertFalse(result.installed)
+            assertTrue(result.skipped)
+            assertTrue(Files.isDirectory(work.resolve("world"), NOFOLLOW_LINKS))
+            assertFalse(Files.exists(work.resolve("world/level.dat")))
+        }
+        assertNoTemporaryWorldArtifacts(work)
+    }
+
+    @Test
+    fun unsupportedProviderFailsClosedBeforeDownloading() {
+        val archive = Files.createTempFile("unsupported-map", ".zip")
+        Files.delete(archive)
+        FileSystems.newFileSystem(URI("jar:${archive.toUri()}"), mapOf("create" to "true")).use { fileSystem ->
+            val work = fileSystem.getPath("/work")
+            assertFailsWith<IOException> {
+                LobbyMapInstaller(ArtifactFetcher()).install(
+                    work,
+                    LobbyMapOptions(randomUrl = URI("http://127.0.0.1:1/map")),
+                )
+            }
+        }
+        Files.deleteIfExists(archive)
+    }
+
+    private fun assertNoTemporaryWorldArtifacts(work: java.nio.file.Path) {
+        assertTrue(Files.list(work).use { stream ->
+            stream.noneMatch { path ->
+                val name = path.fileName.toString()
+                name.endsWith(".zip") ||
+                    name.startsWith(".world-extract-") ||
+                    name.startsWith(".world-publication-probe-")
+            }
+        })
     }
 
 

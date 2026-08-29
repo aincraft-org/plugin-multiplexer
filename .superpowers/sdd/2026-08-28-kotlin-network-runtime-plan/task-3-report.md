@@ -185,3 +185,47 @@ No formatter, linter, project-wide build, project-wide test, later controller, o
 - The reservation is an empty directory, so readers can observe an empty `world` path during installation but can never observe partially extracted map content at that path.
 - Publication requires a filesystem provider that supports atomic directory replacement; unsupported providers fail closed without a non-atomic fallback. Directory identity is also required to verify ownership of the reservation.
 - The focused race test uses an internal test-only callback to deterministically run the creator after reservation verification and before atomic publication.
+
+## Fix Round 3
+
+### Files changed
+
+- `network/runtime/src/main/kotlin/io/github/developmentnetwork/runtime/artifact/LobbyMapInstaller.kt`
+  - replaces the visible empty `world` reservation with a POSIX mode-000 reservation created with a `FileAttribute`; readers and ordinary creators cannot open or populate the destination while extraction is in progress;
+  - verifies the reservation's POSIX mode and filesystem identity before publication and again after the deterministic race seam, preserving any delete/recreate winner without deleting it;
+  - removes `REPLACE_EXISTING`; publication uses only `ATOMIC_MOVE` after the map has been fully validated and extracted;
+  - probes the destination provider before downloading for a POSIX permission view, creation of an inaccessible directory, and atomic directory publication; missing/unsupported capabilities fail closed with `IOException` and no non-atomic fallback;
+  - keeps installer locking, archive cleanup, ZIP metadata/path validation, and immutable existing-world behavior unchanged.
+- `network/runtime/src/test/kotlin/io/github/developmentnetwork/runtime/LobbyMapInstallerTest.kt`
+  - adds reader/creator visibility assertions for mode-000 reservations;
+  - adds deterministic populated and empty delete/recreate final-window tests and verifies the creator's world is never replaced;
+  - adds unsupported ZIP filesystem provider coverage and checks extracted/archive temporary cleanup for successful and creator-race paths.
+
+### TDD evidence
+
+After writing the fix-round-3 tests and before the production protocol change, the required focused command was run:
+
+```text
+./gradlew -p network :runtime:test --rerun-tasks --tests '*ConfigurationSafetyTest' --tests '*ArtifactSafetyTest' --tests '*LobbyMapInstallerTest' --tests '*MinecraftStatusProbeTest'
+```
+
+It failed with the expected new behavior assertions: the old visible reservation had non-empty permissions, and an empty delete/recreate target was replaced by the old `ATOMIC_MOVE, REPLACE_EXISTING` publication. The first attempt also exposed a test-fixture error for an empty ZIP filesystem, which was corrected before the implementation run.
+
+After implementing the inaccessible-reservation protocol, the same focused command was rerun:
+
+```text
+./gradlew -p network :runtime:test --rerun-tasks --tests '*ConfigurationSafetyTest' --tests '*ArtifactSafetyTest' --tests '*LobbyMapInstallerTest' --tests '*MinecraftStatusProbeTest'
+```
+
+Result: `BUILD SUCCESSFUL`; 28 focused tests completed with zero failures or errors, including 12 `LobbyMapInstallerTest` cases.
+
+No formatter, linter, project-wide build, project-wide test, later controller, or Gradle task work was run.
+
+### Guarantee and unsupported behavior
+
+For map modes, the destination protocol is: create `world` atomically with POSIX mode `000`, fully validate/extract beside it, verify the reservation identity and mode, then publish only with an atomic directory move. Consequently, no reader can observe a partially extracted map at the public `world` path, and a creator that deletes/recreates or populates the reservation before the final verification is preserved rather than overwritten. Providers without POSIX permissions, inaccessible-attribute enforcement, or atomic directory moves fail closed before download/publication; there is no replacement or copy fallback.
+
+### Concerns
+
+- The safe publication protocol intentionally requires a provider exposing POSIX permissions and atomic directory moves; providers such as ZIP filesystems are rejected rather than risking visible incomplete content.
+- A caller with authority to bypass the provider's POSIX access controls is outside the ordinary reader/creator contract; identity and mode checks still reject path replacement observed before publication.
