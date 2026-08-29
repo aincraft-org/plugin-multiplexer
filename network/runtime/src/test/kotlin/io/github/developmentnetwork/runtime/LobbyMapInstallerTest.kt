@@ -4,6 +4,7 @@ import com.sun.net.httpserver.HttpServer
 import io.github.developmentnetwork.runtime.artifact.ArtifactFetcher
 import io.github.developmentnetwork.runtime.artifact.LobbyMapInstaller
 import io.github.developmentnetwork.runtime.artifact.LobbyMapOptions
+import io.github.developmentnetwork.runtime.artifact.MapInstallResult
 import java.io.ByteArrayOutputStream
 import java.net.InetSocketAddress
 import java.net.URI
@@ -15,7 +16,6 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
-
 class LobbyMapInstallerTest {
     @Test
     fun rootAndSingleTopLevelFolderWorldsInstallAtomically() {
@@ -118,6 +118,112 @@ class LobbyMapInstallerTest {
                 Files.createTempDirectory("exclusive-map"),
                 LobbyMapOptions(staticUrl = URI("http://static"), staticSha256 = "0".repeat(64), randomUrl = URI("http://random")),
             )
+        }
+    }
+    @Test
+    fun dosVolumeLabelsAndInconsistentMetadataAreRejected() {
+        listOf(
+            EntrySpec("level.dat", "bad", attrs = 0x08L),
+            EntrySpec("level.dat", "bad", attrs = unixMode(0x4000, 0x1ff)),
+        ).forEach { spec ->
+            val work = Files.createTempDirectory("metadata-map")
+            serve(zipEntries(listOf(spec))).use { fixture ->
+                assertFailsWith<IllegalArgumentException> {
+                    LobbyMapInstaller(ArtifactFetcher()).install(
+                        work,
+                        LobbyMapOptions(staticUrl = fixture.url, staticSha256 = fixture.sha256),
+                    )
+                }
+            }
+            assertFalse(Files.exists(work.resolve("world")))
+        }
+    }
+
+    @Test
+    fun concurrentInstallersSerializeAndOnlyOneDownloadsAndInstalls() {
+        val work = Files.createTempDirectory("race-map")
+        val archive = zip(mapOf("level.dat" to "race"))
+        val requests = java.util.concurrent.atomic.AtomicInteger()
+        val firstRequest = java.util.concurrent.CountDownLatch(1)
+        val releaseFirst = java.util.concurrent.CountDownLatch(1)
+        val server = HttpServer.create(InetSocketAddress(0), 0).apply {
+            createContext("/map") { exchange ->
+                if (requests.incrementAndGet() == 1) {
+                    firstRequest.countDown()
+                    releaseFirst.await()
+                }
+                exchange.sendResponseHeaders(200, archive.size.toLong())
+                exchange.responseBody.use { it.write(archive) }
+            }
+            start()
+        }
+        val url = URI("http://127.0.0.1:${server.address.port}/map")
+        val checksum = java.security.MessageDigest.getInstance("SHA-256").digest(archive)
+            .joinToString("") { "%02x".format(it) }
+        val executor = java.util.concurrent.Executors.newFixedThreadPool(2)
+        try {
+            val futures = (1..2).map {
+                executor.submit<MapInstallResult> {
+                    LobbyMapInstaller(ArtifactFetcher()).install(
+                        work,
+                        LobbyMapOptions(staticUrl = url, staticSha256 = checksum),
+                    )
+                }
+            }
+            assertTrue(firstRequest.await(2, java.util.concurrent.TimeUnit.SECONDS))
+            Thread.sleep(200)
+            assertEquals(1, requests.get())
+            releaseFirst.countDown()
+            val results = futures.map { it.get(5, java.util.concurrent.TimeUnit.SECONDS) }
+            assertEquals(1, results.count { it.installed })
+            assertEquals(1, results.count { it.skipped })
+            assertEquals("race", Files.readString(work.resolve("world/level.dat")))
+        } finally {
+            releaseFirst.countDown()
+            executor.shutdownNow()
+            server.stop(0)
+        }
+    }
+
+    @Test
+    fun worldCreatedWhileDownloadIsInFlightIsNeverReplaced() {
+        val work = Files.createTempDirectory("external-race-map")
+        val archive = zip(mapOf("level.dat" to "downloaded"))
+        val request = java.util.concurrent.CountDownLatch(1)
+        val release = java.util.concurrent.CountDownLatch(1)
+        val server = HttpServer.create(InetSocketAddress(0), 0).apply {
+            createContext("/map") { exchange ->
+                request.countDown()
+                release.await()
+                exchange.sendResponseHeaders(200, archive.size.toLong())
+                exchange.responseBody.use { it.write(archive) }
+            }
+            start()
+        }
+        val checksum = java.security.MessageDigest.getInstance("SHA-256").digest(archive)
+            .joinToString("") { "%02x".format(it) }
+        val executor = java.util.concurrent.Executors.newSingleThreadExecutor()
+        try {
+            val future = executor.submit<MapInstallResult> {
+                LobbyMapInstaller(ArtifactFetcher()).install(
+                    work,
+                    LobbyMapOptions(
+                        staticUrl = URI("http://127.0.0.1:${server.address.port}/map"),
+                        staticSha256 = checksum,
+                    ),
+                )
+            }
+            assertTrue(request.await(2, java.util.concurrent.TimeUnit.SECONDS))
+            Files.createDirectories(work.resolve("world"))
+            Files.writeString(work.resolve("world/level.dat"), "external")
+            release.countDown()
+            val result = future.get(5, java.util.concurrent.TimeUnit.SECONDS)
+            assertTrue(result.skipped)
+            assertEquals("external", Files.readString(work.resolve("world/level.dat")))
+        } finally {
+            release.countDown()
+            executor.shutdownNow()
+            server.stop(0)
         }
     }
 

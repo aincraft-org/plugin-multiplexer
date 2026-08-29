@@ -7,7 +7,7 @@ import java.nio.file.Path
 /** Inputs for a managed Paper server's generated configuration. */
 data class PaperConfig(
     val port: Int,
-    val forwardingSecret: String = "dev-local-forwarding-secret-change-me",
+    val forwardingSecret: String = SharedForwardingSecret.VALUE,
     val levelName: String = "world",
     val motd: String = "dev-network lobby",
 )
@@ -15,6 +15,9 @@ data class PaperConfig(
 /** Generates only files owned by a managed Paper work directory. */
 class PaperConfigWriter {
     fun writeManaged(workDir: Path, config: PaperConfig) {
+        require(config.forwardingSecret == SharedForwardingSecret.VALUE) {
+            "Paper forwarding secret must be the shared development secret"
+        }
         require(config.port in 1024..65535) { "Paper port must be in 1024..65535: ${config.port}" }
         require(config.forwardingSecret.isNotBlank() && '\n' !in config.forwardingSecret && '\r' !in config.forwardingSecret) {
             "Forwarding secret must be a non-blank single line"

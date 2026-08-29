@@ -13,6 +13,7 @@ import java.nio.file.Files
 import kotlin.test.Test
 import kotlin.test.assertContains
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
@@ -68,6 +69,106 @@ class ConfigurationSafetyTest {
         val missing = preflight.verifyProxy(work.resolve("missing-velocity.toml"), owned = false)
         assertFalse(missing.success)
         assertContains(missing.message, "unknown")
+    }
+
+    @Test
+    fun preflightRegeneratesMissingOwnedProxyAndChecksModernForwardingSecret() {
+        val work = Files.createTempDirectory("preflight-owned")
+        val proxy = work.resolve("velocity.toml")
+        val secret = work.resolve("forwarding.secret")
+        var regenerated = false
+        val result = OfflinePreflight().verifyProxy(
+            proxy,
+            owned = true,
+            regenerate = {
+                regenerated = true
+                Files.writeString(
+                    proxy,
+                    """
+                    online-mode = false
+                    player-info-forwarding-mode = "modern"
+                    forwarding-secret-file = "forwarding.secret"
+                    """.trimIndent() + "\n",
+                )
+                Files.writeString(secret, "expected-secret\n")
+            },
+            forwardingSecret = "expected-secret",
+        )
+        assertTrue(regenerated)
+        assertTrue(result.success, result.message)
+    }
+
+    @Test
+    fun preflightScopesPaperForwardingAndRejectsDuplicateEffectiveProperties() {
+        val work = Files.createTempDirectory("preflight-structure")
+        Files.writeString(work.resolve("server.properties"), "online-mode=false\n")
+        Files.createDirectories(work.resolve("config"))
+        Files.writeString(
+            work.resolve("config/paper-global.yml"),
+            """
+            unrelated:
+              enabled: true
+              online-mode: false
+              secret: "dev-local-forwarding-secret-change-me"
+            proxies:
+              velocity:
+                enabled: true
+                online-mode: false
+                secret: "dev-local-forwarding-secret-change-me"
+            """.trimIndent() + "\n",
+        )
+        Files.writeString(work.resolve("spigot.yml"), "settings:\n  bungeecord: false\n")
+        val valid = OfflinePreflight().verifyPaper(work)
+        assertTrue(valid.success, valid.message)
+
+        Files.writeString(
+            work.resolve("config/paper-global.yml"),
+            """
+            proxies:
+              velocity:
+                enabled: true
+                enabled: false
+                online-mode: false
+                secret: "dev-local-forwarding-secret-change-me"
+            """.trimIndent() + "\n",
+        )
+        val duplicateYaml = OfflinePreflight().verifyPaper(work)
+        assertFalse(duplicateYaml.success)
+        assertContains(duplicateYaml.message, "duplicate")
+
+        Files.writeString(work.resolve("server.properties"), "online-mode=false\nonline-mode=true\n")
+        val duplicateProperties = OfflinePreflight().verifyPaper(work)
+        assertFalse(duplicateProperties.success)
+        assertContains(duplicateProperties.message, "duplicate")
+    }
+
+    @Test
+    fun preflightRejectsProxyWithoutModernForwardingOrExpectedSecret() {
+        val work = Files.createTempDirectory("preflight-proxy")
+        val proxy = work.resolve("velocity.toml")
+        Files.writeString(
+            proxy,
+            """
+            online-mode = false
+            player-info-forwarding-mode = "legacy"
+            forwarding-secret-file = "forwarding.secret"
+            """.trimIndent() + "\n",
+        )
+        Files.writeString(work.resolve("forwarding.secret"), "wrong\n")
+        val result = OfflinePreflight().verifyProxy(proxy, forwardingSecret = "expected")
+        assertFalse(result.success)
+        assertContains(result.message, "modern")
+    }
+
+    @Test
+    fun configurationWritersRejectUnsynchronizedCustomForwardingSecrets() {
+        val work = Files.createTempDirectory("secret-sync")
+        assertFailsWith<IllegalArgumentException> {
+            PaperConfigWriter().writeManaged(work.resolve("paper"), PaperConfig(30066, forwardingSecret = "paper-only"))
+        }
+        assertFailsWith<IllegalArgumentException> {
+            VelocityConfigWriter().write(RuntimeLayout(work.resolve("velocity")), VelocityConfig(forwardingSecret = "velocity-only"))
+        }
     }
 
     @Test

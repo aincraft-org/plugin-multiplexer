@@ -87,7 +87,10 @@ class MinecraftStatusProbe {
     private fun description(value: Any?): String? = when (value) {
         null -> null
         is String -> value
-        is Map<*, *> -> value["text"]?.toString() ?: value.values.joinToString("") { description(it).orEmpty() }
+        is Map<*, *> -> buildString {
+            append(value["text"]?.toString().orEmpty())
+            (value["extra"] as? List<*>)?.forEach { append(description(it).orEmpty()) }
+        }
         is List<*> -> value.joinToString("") { description(it).orEmpty() }
         else -> value.toString()
     }
@@ -151,18 +154,19 @@ private class JsonParser(private val source: String) {
     private var index = 0
 
     fun parse(): Any? {
-        val value = value()
+        val value = value(0)
         whitespace()
         require(index == source.length) { "trailing JSON data" }
         return value
     }
 
-    private fun value(): Any? {
+    private fun value(depth: Int): Any? {
+        require(depth <= MAX_JSON_DEPTH) { "JSON nesting depth exceeds $MAX_JSON_DEPTH" }
         whitespace()
         require(index < source.length) { "unexpected end of JSON" }
         return when (source[index]) {
-            '{' -> objectValue()
-            '[' -> arrayValue()
+            '{' -> objectValue(depth)
+            '[' -> arrayValue(depth)
             '"' -> stringValue()
             't' -> literal("true", true)
             'f' -> literal("false", false)
@@ -171,7 +175,7 @@ private class JsonParser(private val source: String) {
         }
     }
 
-    private fun objectValue(): Map<String, Any?> {
+    private fun objectValue(depth: Int): Map<String, Any?> {
         index++
         val result = LinkedHashMap<String, Any?>()
         whitespace()
@@ -182,20 +186,20 @@ private class JsonParser(private val source: String) {
             val key = stringValue()
             whitespace()
             require(consume(':')) { "missing object colon" }
-            result[key] = value()
+            result[key] = value(depth + 1)
             whitespace()
             if (consume('}')) return result
             require(consume(',')) { "missing object comma" }
         }
     }
 
-    private fun arrayValue(): List<Any?> {
+    private fun arrayValue(depth: Int): List<Any?> {
         index++
         val result = ArrayList<Any?>()
         whitespace()
         if (consume(']')) return result
         while (true) {
-            result += value()
+            result += value(depth + 1)
             whitespace()
             if (consume(']')) return result
             require(consume(',')) { "missing array comma" }
@@ -269,4 +273,8 @@ private class JsonParser(private val source: String) {
         index++
         true
     } else false
+    private companion object {
+        const val MAX_JSON_DEPTH = 64
+    }
+
 }

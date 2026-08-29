@@ -2,13 +2,15 @@ package io.github.developmentnetwork.runtime.artifact
 
 import java.io.IOException
 import java.net.URI
-import java.nio.charset.Charset
+import java.nio.channels.FileChannel
+import java.nio.channels.OverlappingFileLockException
 import java.nio.file.DirectoryNotEmptyException
 import java.nio.file.FileAlreadyExistsException
 import java.nio.file.Files
 import java.nio.file.LinkOption.NOFOLLOW_LINKS
 import java.nio.file.Path
-import java.nio.file.StandardCopyOption.ATOMIC_MOVE
+import java.nio.file.StandardOpenOption.CREATE
+import java.nio.file.StandardOpenOption.WRITE
 import java.util.zip.ZipEntry
 import java.util.zip.ZipException
 import java.util.zip.ZipFile
@@ -38,7 +40,12 @@ data class MapInstallResult(
 
 /** Validates and atomically installs one immutable lobby world. */
 class LobbyMapInstaller(private val fetcher: ArtifactFetcher) {
-    fun install(workDir: Path, options: LobbyMapOptions): MapInstallResult {
+    fun install(workDir: Path, options: LobbyMapOptions): MapInstallResult =
+        withInstallationLock(workDir) {
+            installLocked(workDir, options)
+        }
+
+    private fun installLocked(workDir: Path, options: LobbyMapOptions): MapInstallResult {
         validateOptions(options)
         Files.createDirectories(workDir)
         val world = workDir.resolve("world")
@@ -67,11 +74,11 @@ class LobbyMapInstaller(private val fetcher: ArtifactFetcher) {
                 MapInstallMode.RANDOM -> fetcher.download(options.randomUrl!!, archive)
                 MapInstallMode.NONE -> null
             }
-            installArchive(archive, workDir, world)
-            return if (existingWorldState(world) == ExistingWorld.COMPLETE) {
+            val installed = installArchive(archive, workDir, world)
+            return if (installed) {
                 MapInstallResult(installed = true, skipped = false, world = world, mode = selectedMode, archiveSha256 = checksum)
             } else {
-                // A concurrent installer may have won the destination race.
+                // A concurrently created world may have won the destination race.
                 MapInstallResult(installed = false, skipped = true, world = world, mode = selectedMode, archiveSha256 = checksum)
             }
         } finally {
@@ -79,14 +86,20 @@ class LobbyMapInstaller(private val fetcher: ArtifactFetcher) {
         }
     }
 
-    private fun installArchive(archive: Path, workDir: Path, world: Path) {
+    private fun installArchive(archive: Path, workDir: Path, world: Path): Boolean {
         val extraction = Files.createTempDirectory(workDir, ".world-extract-")
         try {
             val source = validateAndExtract(archive, extraction)
-            try {
-                Files.move(source, world, ATOMIC_MOVE)
+            // Re-check immediately before the no-replace move.  The move has no
+            // REPLACE_EXISTING option, so an unrelated creator that wins this
+            // race remains the immutable world.
+            if (existingWorldState(world) != ExistingWorld.ABSENT) return false
+            return try {
+                Files.move(source, world)
+                true
             } catch (_: FileAlreadyExistsException) {
                 // Preserve a world installed by another process; immutable means never replace it.
+                false
             }
         } finally {
             deleteTree(extraction)
@@ -224,12 +237,31 @@ class LobbyMapInstaller(private val fetcher: ArtifactFetcher) {
         require(options.randomUrl == null || !staticAny) {
             "Set random URL, or both static URL and static SHA-256, or neither"
         }
+
         require(options.staticUrl == null == (options.staticSha256 == null)) {
             "Static lobby map mode requires both URL and exact SHA-256"
         }
         if (options.staticSha256 != null) {
             require(LOWERCASE_SHA256.matches(options.staticSha256)) {
                 "Static lobby map SHA-256 must be exactly 64 lowercase hexadecimal characters"
+            }
+        }
+    }
+    private fun <T> withInstallationLock(workDir: Path, action: () -> T): T {
+        Files.createDirectories(workDir)
+        val lock = workDir.resolve(".world-install.lock")
+        FileChannel.open(lock, CREATE, WRITE).use { channel ->
+            while (true) {
+                try {
+                    channel.lock().use { return action() }
+                } catch (_: OverlappingFileLockException) {
+                    try {
+                        Thread.sleep(10)
+                    } catch (error: InterruptedException) {
+                        Thread.currentThread().interrupt()
+                        throw IOException("Interrupted while waiting for lobby world lock $lock", error)
+                    }
+                }
             }
         }
     }

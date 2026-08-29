@@ -6,10 +6,12 @@ import java.net.http.HttpClient
 import java.net.http.HttpRequest
 import java.net.http.HttpResponse
 import java.nio.file.Files
+import java.nio.file.LinkOption.NOFOLLOW_LINKS
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption.ATOMIC_MOVE
 import java.nio.file.StandardCopyOption.REPLACE_EXISTING
 import java.nio.file.StandardOpenOption.CREATE
+import java.nio.file.StandardOpenOption.CREATE_NEW
 import java.nio.file.StandardOpenOption.WRITE
 import java.nio.channels.FileChannel
 import java.nio.channels.OverlappingFileLockException
@@ -19,18 +21,21 @@ import java.util.UUID
 /** Streams pinned artifacts to a verified, atomically installed destination. */
 class ArtifactFetcher(private val http: HttpClient) {
     constructor() : this(HttpClient.newBuilder().followRedirects(HttpClient.Redirect.NORMAL).build())
-
     fun fetch(url: URI, expectedSha256: String, destination: Path): Path {
         require(LOWERCASE_SHA256.matches(expectedSha256)) {
             "Expected SHA-256 must be exactly 64 lowercase hexadecimal characters"
         }
         return withDestinationLock(destination) {
+            ensureSafeDestination(destination)
             Files.createDirectories(destination.parent ?: Path.of("."))
-            if (Files.exists(destination)) {
-                require(Files.isRegularFile(destination)) { "Artifact destination is not a regular file: $destination" }
+            if (Files.exists(destination, NOFOLLOW_LINKS)) {
+                require(Files.isRegularFile(destination, NOFOLLOW_LINKS)) {
+                    "Artifact destination is not a regular file: $destination"
+                }
                 val actual = sha256(destination)
                 if (actual == expectedSha256) return@withDestinationLock destination
-                Files.delete(destination)
+                // Keep a stale-but-readable destination until the replacement has
+                // been downloaded and verified.  A failed fetch must not destroy it.
             }
             val temporary = temporaryPath(destination)
             try {
@@ -38,6 +43,7 @@ class ArtifactFetcher(private val http: HttpClient) {
                 if (actual != expectedSha256) {
                     throw IOException("SHA-256 mismatch for $url: expected $expectedSha256, got $actual")
                 }
+                ensureSafeDestination(destination)
                 atomicReplace(temporary, destination)
                 destination
             } finally {
@@ -48,10 +54,12 @@ class ArtifactFetcher(private val http: HttpClient) {
 
     /** Download an unpinned selection while returning its computed lowercase SHA-256. */
     fun download(url: URI, destination: Path): String = withDestinationLock(destination) {
+        ensureSafeDestination(destination)
         Files.createDirectories(destination.parent ?: Path.of("."))
         val temporary = temporaryPath(destination)
         try {
             val actual = downloadTo(url, temporary)
+            ensureSafeDestination(destination)
             atomicReplace(temporary, destination)
             actual
         } finally {
@@ -73,7 +81,7 @@ class ArtifactFetcher(private val http: HttpClient) {
         }
         val digest = MessageDigest.getInstance("SHA-256")
         response.body().use { input ->
-            Files.newOutputStream(temporary, CREATE, WRITE).use { output ->
+            Files.newOutputStream(temporary, CREATE_NEW, WRITE).use { output ->
                 val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
                 while (true) {
                     val count = input.read(buffer)
@@ -98,6 +106,12 @@ class ArtifactFetcher(private val http: HttpClient) {
             }
         }
         return digest.digest().toHex()
+    }
+
+    private fun ensureSafeDestination(destination: Path) {
+        require(!Files.isSymbolicLink(destination)) {
+            "Artifact destination must not be a symbolic link: $destination"
+        }
     }
 
     private fun atomicReplace(source: Path, target: Path) {

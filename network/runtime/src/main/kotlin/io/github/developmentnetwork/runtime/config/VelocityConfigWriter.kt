@@ -5,6 +5,10 @@ import io.github.developmentnetwork.runtime.state.AtomicFiles
 import io.github.developmentnetwork.runtime.state.RuntimeLayout
 import java.nio.file.Files
 import java.nio.file.Path
+/** The one development-network forwarding secret used by both proxy and Paper. */
+object SharedForwardingSecret {
+    const val VALUE = "dev-local-forwarding-secret-change-me"
+}
 
 /** Inputs for the deterministic development-network Velocity configuration. */
 data class VelocityConfig(
@@ -13,11 +17,15 @@ data class VelocityConfig(
     val onlineMode: Boolean = true,
     /** Optional explicit/persisted backend ports keyed by validated backend name text. */
     val backendPorts: Map<String, Int> = emptyMap(),
+    val forwardingSecret: String = SharedForwardingSecret.VALUE,
 )
 
 /** Writes the one canonical Velocity configuration used by boot and reload. */
 class VelocityConfigWriter {
     fun write(layout: RuntimeLayout, config: VelocityConfig): Path {
+        require(config.forwardingSecret == SharedForwardingSecret.VALUE) {
+            "Velocity forwarding secret must be the shared development secret"
+        }
         require(config.proxyPort in 0..65535) { "Proxy port must be in 0..65535: ${config.proxyPort}" }
         require(config.targetServer.isNotBlank() && '\n' !in config.targetServer && '\r' !in config.targetServer) {
             "Target server must be a non-blank single-line host"
@@ -53,8 +61,7 @@ class VelocityConfigWriter {
             name.value to port
         }
 
-        val secret = "dev-local-forwarding-secret-change-me"
-        AtomicFiles.write(layout.forwardingSecret, "$secret\n")
+        AtomicFiles.write(layout.forwardingSecret, "${config.forwardingSecret}\n")
         val forwardingPath = tomlString(layout.forwardingSecret.toAbsolutePath().toString())
         val target = tomlString(config.targetServer)
         val content = buildString {

@@ -14,7 +14,7 @@ import kotlin.test.assertTrue
 
 class ArtifactSafetyTest {
     @Test
-    fun existingFileWithMatchingChecksumIsReusedAndMismatchIsReplaced() {
+    fun existingFileWithMatchingChecksumIsReusedAndMismatchReplacementPreservesOldUntilVerified() {
         val directory = Files.createTempDirectory("artifact")
         val destination = directory.resolve("paper.jar")
         val bytes = "fresh artifact".toByteArray()
@@ -55,12 +55,13 @@ class ArtifactSafetyTest {
     }
 
     @Test
-    fun failedDownloadCleansTemporaryOutputAndDoesNotLeaveDestination() {
+    fun checksumFailurePreservesExistingDestinationAndCleansTemporaryOutput() {
         val directory = Files.createTempDirectory("artifact-failure")
         val destination = directory.resolve("paper.jar")
+        Files.writeString(destination, "old verified artifact")
         val server = HttpServer.create(InetSocketAddress(0), 0).apply {
             createContext("/artifact") { exchange ->
-                exchange.sendResponseHeaders(200, 100)
+                exchange.sendResponseHeaders(200, 5)
                 exchange.responseBody.use { it.write("short".toByteArray()) }
             }
             start()
@@ -73,8 +74,58 @@ class ArtifactSafetyTest {
                     destination,
                 )
             }
-            assertFalse(Files.exists(destination))
+            assertEquals("old verified artifact", Files.readString(destination))
             assertTrue(Files.list(directory).use { stream -> stream.noneMatch { it.fileName.toString().endsWith(".tmp") } })
+        } finally {
+            server.stop(0)
+        }
+    }
+
+    @Test
+    fun httpFailurePreservesExistingDestination() {
+        val directory = Files.createTempDirectory("artifact-http-failure")
+        val destination = directory.resolve("paper.jar")
+        Files.writeString(destination, "old verified artifact")
+        val server = HttpServer.create(InetSocketAddress(0), 0).apply {
+            createContext("/artifact") { exchange ->
+                exchange.sendResponseHeaders(503, -1)
+                exchange.close()
+            }
+            start()
+        }
+        try {
+            assertFailsWith<Exception> {
+                ArtifactFetcher().fetch(
+                    URI("http://127.0.0.1:${server.address.port}/artifact"),
+                    "0000000000000000000000000000000000000000000000000000000000000000",
+                    destination,
+                )
+            }
+            assertEquals("old verified artifact", Files.readString(destination))
+        } finally {
+            server.stop(0)
+        }
+    }
+
+    @Test
+    fun symlinkDestinationIsRejectedWithoutFollowingTarget() {
+        val directory = Files.createTempDirectory("artifact-symlink")
+        val target = directory.resolve("target.jar")
+        Files.writeString(target, "old target")
+        val destination = directory.resolve("paper.jar")
+        Files.createSymbolicLink(destination, target.fileName)
+        val bytes = "fresh artifact".toByteArray()
+        val server = fixture(bytes)
+        try {
+            assertFailsWith<IllegalArgumentException> {
+                ArtifactFetcher().fetch(
+                    URI("http://127.0.0.1:${server.address.port}/artifact"),
+                    sha256(bytes),
+                    destination,
+                )
+            }
+            assertEquals("old target", Files.readString(target))
+            assertTrue(Files.isSymbolicLink(destination))
         } finally {
             server.stop(0)
         }

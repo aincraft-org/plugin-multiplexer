@@ -19,7 +19,7 @@ class MinecraftStatusProbeTest {
             server.use { listener ->
                 listener.accept().use { socket ->
                     consumeRequest(socket)
-                    val json = "{\"version\":{\"name\":\"Paper 26.2\"},\"description\":{\"text\":\"Lobby\"},\"players\":{\"online\":2,\"max\":20}}"
+                    val json = "{\"version\":{\"name\":\"Paper 26.2\"},\"description\":{\"text\":\"Lobby\",\"extra\":[{\"text\":\" \"},{\"text\":\"Map\"}]},\"players\":{\"online\":2,\"max\":20}}"
                     sendStatus(socket, json)
                 }
             }
@@ -28,9 +28,27 @@ class MinecraftStatusProbeTest {
         worker.join()
         assertTrue(status.reachable, status.error.orEmpty())
         assertEquals("Paper 26.2", status.version)
-        assertEquals("Lobby", status.motd)
+        assertEquals("Lobby Map", status.motd)
         assertEquals(2, status.playersOnline)
         assertEquals(20, status.playersMax)
+    }
+
+    @Test
+    fun rejectsExcessivelyDeepStatusJson() {
+        val server = ServerSocket(0)
+        val worker = thread(start = true) {
+            server.use { listener ->
+                listener.accept().use { socket ->
+                    consumeRequest(socket)
+                    val nested = "[".repeat(300) + "\"too-deep\"" + "]".repeat(300)
+                    sendStatus(socket, "{\"description\":$nested}")
+                }
+            }
+        }
+        val status = MinecraftStatusProbe().probe("127.0.0.1", server.localPort, Duration.ofSeconds(2))
+        worker.join()
+        assertFalse(status.reachable)
+        assertTrue(status.error?.contains("depth", ignoreCase = true) == true, status.error.orEmpty())
     }
 
     @Test
@@ -53,6 +71,7 @@ class MinecraftStatusProbeTest {
         assertFalse(unavailable.reachable)
         assertTrue(!unavailable.error.isNullOrBlank())
     }
+
 
     private fun consumeRequest(socket: Socket) {
         socket.soTimeout = 2_000
