@@ -55,6 +55,24 @@ class ArtifactSafetyTest {
     }
 
     @Test
+    fun binaryExistingFileWithMatchingChecksumIsReusedWithoutARequest() {
+        val directory = Files.createTempDirectory("artifact-binary-reuse")
+        val destination = directory.resolve("paper.jar")
+        val bytes = byteArrayOf(0x80.toByte(), 0xff.toByte(), 0x01)
+        val checksum = "36aaaa7977c2e797c6e791a6cbf9b93a9990141b5c82fa9063ad954d3ae2855b"
+        Files.write(destination, bytes)
+        val requests = java.util.concurrent.atomic.AtomicInteger()
+        val server = fixture(bytes, requests)
+
+        try {
+            ArtifactFetcher().fetch(URI("http://127.0.0.1:${server.address.port}/artifact"), checksum, destination)
+            assertEquals(0, requests.get())
+        } finally {
+            server.stop(0)
+        }
+    }
+
+    @Test
     fun checksumFailurePreservesExistingDestinationAndCleansTemporaryOutput() {
         val directory = Files.createTempDirectory("artifact-failure")
         val destination = directory.resolve("paper.jar")
@@ -131,8 +149,12 @@ class ArtifactSafetyTest {
         }
     }
 
-    private fun fixture(bytes: ByteArray): HttpServer = HttpServer.create(InetSocketAddress(0), 0).apply {
+    private fun fixture(
+        bytes: ByteArray,
+        requests: java.util.concurrent.atomic.AtomicInteger? = null,
+    ): HttpServer = HttpServer.create(InetSocketAddress(0), 0).apply {
         createContext("/artifact") { exchange ->
+            requests?.incrementAndGet()
             exchange.sendResponseHeaders(200, bytes.size.toLong())
             exchange.responseBody.use { it.write(bytes) }
         }
