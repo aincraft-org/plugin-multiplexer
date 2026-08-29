@@ -78,8 +78,10 @@ object RuntimeArtifactLauncher {
             throw IllegalArgumentException("Runtime project directory does not exist: $projectDir")
         }
 
-        val command = ArrayList<String>(request.size + 3)
+        val command = ArrayList<String>(request.size + 5)
         command += javaExecutable.toString()
+        command += "--enable-preview"
+        command += "--enable-native-access=ALL-UNNAMED"
         command += "-jar"
         command += runtimeJar.absolutePath
         command.addAll(request)

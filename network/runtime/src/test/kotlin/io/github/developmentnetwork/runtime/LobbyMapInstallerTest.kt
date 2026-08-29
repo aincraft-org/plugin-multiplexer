@@ -230,44 +230,40 @@ class LobbyMapInstallerTest {
         }
     }
     @Test
-    fun inaccessibleReservationHidesIncompleteWorldFromReadersAndCreators() {
-        val work = Files.createTempDirectory("inaccessible-map")
+    fun absentWorldHidesIncompleteExtractionAndCreatorCanWinFinalWindow() {
+        val work = Files.createTempDirectory("visibility-map")
         val archive = zip(mapOf("level.dat" to "published", "region/r.0.0.mca" to "region"))
         var readerFailure: Throwable? = null
-        var creatorFailure: Throwable? = null
 
         serve(archive).use { fixture ->
             val installer = LobbyMapInstaller(ArtifactFetcher())
             installer.beforePublication = {
                 val world = work.resolve("world")
-                assertTrue(Files.isDirectory(world, NOFOLLOW_LINKS))
-                assertTrue(Files.getPosixFilePermissions(world, NOFOLLOW_LINKS).isEmpty())
+                assertFalse(Files.exists(world, NOFOLLOW_LINKS))
                 try {
                     Files.list(world).use { it.findAny() }
                 } catch (error: Throwable) {
                     readerFailure = error
                 }
-                try {
-                    Files.writeString(world.resolve("creator.txt"), "incomplete")
-                } catch (error: Throwable) {
-                    creatorFailure = error
-                }
+                Files.createDirectory(world)
+                Files.writeString(world.resolve("creator.txt"), "incomplete")
             }
             val result = installer.install(
                 work,
                 LobbyMapOptions(staticUrl = fixture.url, staticSha256 = fixture.sha256),
             )
 
-            assertTrue(result.installed)
+            assertFalse(result.installed)
+            assertTrue(result.skipped)
             assertTrue(readerFailure is IOException)
-            assertTrue(creatorFailure is IOException)
-            assertEquals("published", Files.readString(work.resolve("world/level.dat")))
+            assertEquals("incomplete", Files.readString(work.resolve("world/creator.txt")))
+            assertFalse(Files.exists(work.resolve("world/level.dat")))
         }
         assertNoTemporaryWorldArtifacts(work)
     }
 
     @Test
-    fun populatedCreatorAfterFinalReservationCheckIsNeverReplaced() {
+    fun populatedCreatorDeleteRecreateAfterFinalCheckIsNeverReplaced() {
         val work = Files.createTempDirectory("populated-final-window-map")
         val archive = zip(mapOf("level.dat" to "published", "region/r.0.0.mca" to "region"))
         var creatorFailure: Throwable? = null
@@ -276,6 +272,9 @@ class LobbyMapInstallerTest {
             val installer = LobbyMapInstaller(ArtifactFetcher())
             installer.beforePublication = {
                 val world = work.resolve("world")
+                Files.createDirectory(world)
+                Files.writeString(world.resolve("creator.txt"), "first")
+                Files.delete(world.resolve("creator.txt"))
                 Files.delete(world)
                 Files.createDirectory(world)
                 try {
@@ -299,14 +298,13 @@ class LobbyMapInstallerTest {
     }
 
     @Test
-    fun emptyCreatorAfterFinalReservationCheckIsNeverReplaced() {
+    fun emptyCreatorAfterFinalCheckIsNeverReplaced() {
         val work = Files.createTempDirectory("empty-final-window-map")
         val archive = zip(mapOf("level.dat" to "published", "region/r.0.0.mca" to "region"))
         serve(archive).use { fixture ->
             val installer = LobbyMapInstaller(ArtifactFetcher())
             installer.beforePublication = {
                 val world = work.resolve("world")
-                Files.delete(world)
                 Files.createDirectory(world)
             }
             val result = installer.install(

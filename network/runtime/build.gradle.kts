@@ -37,9 +37,11 @@ tasks.withType<KotlinCompile>().configureEach {
 
 application {
     mainClass.set("io.github.developmentnetwork.runtime.RuntimeMainKt")
+    applicationDefaultJvmArgs = listOf("--enable-preview", "--enable-native-access=ALL-UNNAMED")
 }
 tasks.test {
     useJUnitPlatform()
+    jvmArgs("--enable-preview", "--enable-native-access=ALL-UNNAMED")
 }
 
 tasks.named<Jar>("jar") {
@@ -48,6 +50,7 @@ tasks.named<Jar>("jar") {
     duplicatesStrategy = org.gradle.api.file.DuplicatesStrategy.EXCLUDE
     manifest {
         attributes["Main-Class"] = "io.github.developmentnetwork.runtime.RuntimeMainKt"
+        attributes["Enable-Native-Access"] = "ALL-UNNAMED"
     }
     from(sourceSets.main.get().output)
     from(configurations.runtimeClasspath.get().map { file ->
