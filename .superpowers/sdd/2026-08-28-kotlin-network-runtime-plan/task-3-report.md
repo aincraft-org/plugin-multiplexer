@@ -146,3 +146,42 @@ No formatter, linter, project-wide build, project-wide test, later controller, o
 - Lobby installation uses the JDK provider's same-directory no-replace move after a final destination re-check; it intentionally does not pass `REPLACE_EXISTING`.
 - Preflight intentionally fails closed for malformed/unsupported properties and rejects duplicate keys rather than relying on parser last-value behavior.
 - Existing unrelated changes in `README.md`, `SKILL.md`, `bin/`, `docs/`, and `AGENTS.md` were not staged.
+
+## Fix Round 2
+
+### Files changed
+
+- `network/runtime/src/main/kotlin/io/github/developmentnetwork/runtime/artifact/LobbyMapInstaller.kt`
+  - claims the absent `world` path with an atomically created empty directory reservation before the final publication check;
+  - records the reservation directory identity and refuses publication if the claim is lost or populated;
+  - publishes the fully validated extraction only with `ATOMIC_MOVE` and `REPLACE_EXISTING`, replacing only the installer's empty reservation;
+  - fails closed when the provider cannot perform the atomic publication or refuses reservation replacement;
+  - preserves a creator that populates the reservation after the final check, including the default Unix provider's generic `FileSystemException` response.
+- `network/runtime/src/test/kotlin/io/github/developmentnetwork/runtime/LobbyMapInstallerTest.kt`
+  - adds a deterministic final-window creator test that observes the empty reservation, attempts an empty/incomplete world creation after the final reservation check, and verifies no map files are published over it.
+
+### TDD evidence
+
+After adding the final-window race test and before implementing the reservation protocol, the required command was run:
+
+```text
+./gradlew -p network :runtime:test --rerun-tasks --tests '*ConfigurationSafetyTest' --tests '*ArtifactSafetyTest' --tests '*LobbyMapInstallerTest' --tests '*MinecraftStatusProbeTest'
+```
+
+It failed during `:runtime:compileTestKotlin` because `LobbyMapInstaller` did not yet expose the test hook used to place the creator after the final check (`Too many arguments for constructor(fetcher: ArtifactFetcher)`).
+
+After implementing the reservation protocol, the same focused command was rerun:
+
+```text
+./gradlew -p network :runtime:test --rerun-tasks --tests '*ConfigurationSafetyTest' --tests '*ArtifactSafetyTest' --tests '*LobbyMapInstallerTest' --tests '*MinecraftStatusProbeTest'
+```
+
+Result: `BUILD SUCCESSFUL`; 25 focused tests completed with zero failures or errors, including 9 `LobbyMapInstallerTest` cases.
+
+No formatter, linter, project-wide build, project-wide test, later controller, or Gradle task work was run.
+
+### Concerns
+
+- The reservation is an empty directory, so readers can observe an empty `world` path during installation but can never observe partially extracted map content at that path.
+- Publication requires a filesystem provider that supports atomic directory replacement; unsupported providers fail closed without a non-atomic fallback. Directory identity is also required to verify ownership of the reservation.
+- The focused race test uses an internal test-only callback to deterministically run the creator after reservation verification and before atomic publication.

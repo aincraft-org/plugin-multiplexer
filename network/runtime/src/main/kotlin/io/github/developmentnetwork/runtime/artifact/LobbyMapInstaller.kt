@@ -4,13 +4,19 @@ import java.io.IOException
 import java.net.URI
 import java.nio.channels.FileChannel
 import java.nio.channels.OverlappingFileLockException
+import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.DirectoryNotEmptyException
 import java.nio.file.FileAlreadyExistsException
+import java.nio.file.FileSystemException
 import java.nio.file.Files
 import java.nio.file.LinkOption.NOFOLLOW_LINKS
 import java.nio.file.Path
+import java.nio.file.StandardCopyOption.ATOMIC_MOVE
+import java.nio.file.StandardCopyOption.REPLACE_EXISTING
 import java.nio.file.StandardOpenOption.CREATE
 import java.nio.file.StandardOpenOption.WRITE
+import java.nio.file.attribute.BasicFileAttributes
+import java.util.UUID
 import java.util.zip.ZipEntry
 import java.util.zip.ZipException
 import java.util.zip.ZipFile
@@ -40,6 +46,8 @@ data class MapInstallResult(
 
 /** Validates and atomically installs one immutable lobby world. */
 class LobbyMapInstaller(private val fetcher: ArtifactFetcher) {
+    /** Test-only seam invoked after reservation verification and before publication. */
+    internal var beforePublication: (() -> Unit)? = null
     fun install(workDir: Path, options: LobbyMapOptions): MapInstallResult =
         withInstallationLock(workDir) {
             installLocked(workDir, options)
@@ -78,7 +86,7 @@ class LobbyMapInstaller(private val fetcher: ArtifactFetcher) {
             return if (installed) {
                 MapInstallResult(installed = true, skipped = false, world = world, mode = selectedMode, archiveSha256 = checksum)
             } else {
-                // A concurrently created world may have won the destination race.
+                // A concurrent creator may have won the destination reservation race.
                 MapInstallResult(installed = false, skipped = true, world = world, mode = selectedMode, archiveSha256 = checksum)
             }
         } finally {
@@ -88,20 +96,48 @@ class LobbyMapInstaller(private val fetcher: ArtifactFetcher) {
 
     private fun installArchive(archive: Path, workDir: Path, world: Path): Boolean {
         val extraction = Files.createTempDirectory(workDir, ".world-extract-")
+        var reservation: WorldReservation? = null
         try {
             val source = validateAndExtract(archive, extraction)
-            // Re-check immediately before the no-replace move.  The move has no
-            // REPLACE_EXISTING option, so an unrelated creator that wins this
-            // race remains the immutable world.
+            // Claim the destination itself before the final publication check.
+            // CREATE_DIRECTORY makes a concurrent creator either win before this
+            // point (in which case it is preserved) or find our empty reservation.
+            // Readers see an empty world directory until the atomic move.
             if (existingWorldState(world) != ExistingWorld.ABSENT) return false
-            return try {
-                Files.move(source, world)
-                true
-            } catch (_: FileAlreadyExistsException) {
-                // Preserve a world installed by another process; immutable means never replace it.
-                false
+            reservation = reserveWorld(world) ?: return false
+            requireReservation(world, reservation)
+            beforePublication?.invoke()
+            try {
+                Files.move(source, world, ATOMIC_MOVE, REPLACE_EXISTING)
+            } catch (_: DirectoryNotEmptyException) {
+                // A creator populated the reserved directory after the final
+                // check; preserve that incomplete world and do not publish ours.
+                return false
+            } catch (unsupported: AtomicMoveNotSupportedException) {
+                throw IOException(
+                    "Cannot publish lobby world atomically: filesystem does not support ATOMIC_MOVE ($source -> $world)",
+                    unsupported,
+                )
+            } catch (alreadyExists: FileAlreadyExistsException) {
+                throw IOException(
+                    "Cannot publish lobby world: filesystem refused replacement of its reservation ($world)",
+                    alreadyExists,
+                )
+            } catch (error: FileSystemException) {
+                if (error.file == source.toString() &&
+                    error.otherFile == world.toString() &&
+                    error.reason == "Directory not empty"
+                ) {
+                    // The default Unix provider reports a non-empty target as
+                    // FileSystemException rather than DirectoryNotEmptyException.
+                    return false
+                }
+                throw error
             }
+            reservation = null
+            return true
         } finally {
+            reservation?.let { releaseReservation(world, it) }
             deleteTree(extraction)
         }
     }
@@ -231,6 +267,49 @@ class LobbyMapInstaller(private val fetcher: ArtifactFetcher) {
         Files.isDirectory(world, NOFOLLOW_LINKS) && isRegularFileNoFollow(world.resolve("level.dat")) -> ExistingWorld.COMPLETE
         else -> ExistingWorld.INCOMPLETE
     }
+    private fun reserveWorld(world: Path): WorldReservation? {
+        try {
+            Files.createDirectory(world)
+        } catch (_: FileAlreadyExistsException) {
+            return null
+        }
+
+        return try {
+            val fileKey = Files.readAttributes(world, BasicFileAttributes::class.java, NOFOLLOW_LINKS).fileKey()
+                ?: throw IOException("Cannot reserve lobby world: filesystem does not expose directory identity ($world)")
+            WorldReservation(fileKey)
+        } catch (error: Exception) {
+            try {
+                Files.deleteIfExists(world)
+            } catch (cleanup: Exception) {
+                error.addSuppressed(cleanup)
+            }
+            throw error
+        }
+    }
+
+    private fun requireReservation(world: Path, reservation: WorldReservation) {
+        if (!ownsReservation(world, reservation)) {
+            throw IOException("Lobby world reservation was lost before atomic publication: $world")
+        }
+    }
+
+    private fun releaseReservation(world: Path, reservation: WorldReservation) {
+        if (ownsReservation(world, reservation)) {
+            Files.deleteIfExists(world)
+        }
+    }
+
+    private fun ownsReservation(world: Path, reservation: WorldReservation): Boolean {
+        if (!Files.isDirectory(world, NOFOLLOW_LINKS)) return false
+        return try {
+            val attributes = Files.readAttributes(world, BasicFileAttributes::class.java, NOFOLLOW_LINKS)
+            attributes.fileKey() == reservation.fileKey &&
+                Files.list(world).use { stream -> !stream.findAny().isPresent }
+        } catch (_: IOException) {
+            false
+        }
+    }
 
     private fun validateOptions(options: LobbyMapOptions) {
         val staticAny = options.staticUrl != null || options.staticSha256 != null
@@ -291,6 +370,7 @@ class LobbyMapInstaller(private val fetcher: ArtifactFetcher) {
     }
 
     private enum class ExistingWorld { ABSENT, INCOMPLETE, COMPLETE }
+    private data class WorldReservation(val fileKey: Any)
 
     private companion object {
         const val EOCD_SIGNATURE = 0x06054b50L

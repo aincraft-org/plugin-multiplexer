@@ -226,6 +226,37 @@ class LobbyMapInstallerTest {
             server.stop(0)
         }
     }
+    @Test
+    fun creatorAfterFinalReservationCheckCannotCreateEmptyWorldOrObservePartialInstall() {
+        val work = Files.createTempDirectory("final-window-map")
+        val archive = zip(mapOf("level.dat" to "published", "region/r.0.0.mca" to "region"))
+        val creatorFailure = java.util.concurrent.atomic.AtomicReference<Throwable?>()
+
+        serve(archive).use { fixture ->
+            val installer = LobbyMapInstaller(ArtifactFetcher())
+            installer.beforePublication = {
+                assertTrue(Files.isDirectory(work.resolve("world")))
+                assertFalse(Files.exists(work.resolve("world/level.dat")))
+                try {
+                    Files.createDirectories(work.resolve("world"))
+                    Files.writeString(work.resolve("world/creator.txt"), "incomplete")
+                } catch (error: Throwable) {
+                    creatorFailure.set(error)
+                }
+            }
+            val result = installer.install(
+                work,
+                LobbyMapOptions(staticUrl = fixture.url, staticSha256 = fixture.sha256),
+            )
+
+            assertFalse(result.installed)
+            assertTrue(result.skipped)
+            assertTrue(creatorFailure.get() == null)
+            assertEquals("incomplete", Files.readString(work.resolve("world/creator.txt")))
+            assertFalse(Files.exists(work.resolve("world/level.dat")))
+        }
+    }
+
 
     @Test
     fun randomModeDownloadsAndRemovesItsTemporaryArchive() {
