@@ -32,6 +32,10 @@ velocity-plugin/build/libs/proxy-inspector-<version>.jar
 
 The network plugin embeds a separate Kotlin runtime JVM at `META-INF/development-network/runtime.jar`. A consumer extracts that verified artifact into its Gradle user home and launches it with `${java.home}/bin/java`. No source-tree path, generated launcher, or inherited registry environment is needed by a consumer.
 
+## Remote CI
+
+On a clean GitHub Actions checkout, CI uses Java 25 and the committed Gradle wrapper. It runs `./gradlew clean check` and then `./gradlew assemble`. This describes the remote build sequence; it does not claim any current remote status.
+
 ## Consumer setup
 
 For a local checkout, include the `network/` Gradle build in the consuming project. This is a clean composite build: the consumer needs no copied files or installed runtime.
@@ -86,6 +90,39 @@ Long-lived tasks block until interrupted. Short registration, cleanup, reload, r
 
 `runNetwork` is useful for one project, but is not the coordination primitive for multiple projects sharing a base.
 
+### Dedicated shared network / external backend
+
+Use a dedicated `networkBase` for this coordination domain, and start its controller once with explicit, non-conflicting infrastructure ports:
+
+```text
+./gradlew runProxy \
+  -PnetworkBase=run/dedicated-network \
+  -PnetworkProxyPort=25565 \
+  -PnetworkLobbyPort=30069
+```
+
+With an already-running external Paper server listening on backend port `25566`, register it against the active controller. Supply the external Paper files through `networkServerDir` and keep the registration owner stable across runs:
+
+```text
+./gradlew registerBackend \
+  -PnetworkLobbyPort=30069 \
+  -PnetworkBackend=external-paper \
+  -PnetworkBackendPort=25566 \
+  -PnetworkServerDir=run/external-paper \
+  -PnetworkRegistrationOwner=external-paper-owner
+```
+
+Registration uses the active controller's existing proxy configuration, requires `networkLobbyPort` and `networkServerDir` to identify the backend and its files, and never edits or stops Paper. Inspect the endpoints afterward:
+
+```text
+./gradlew networkStatus \
+  -PnetworkBase=run/dedicated-network \
+  -PnetworkProxyPort=25565 \
+  -PnetworkLobbyPort=30069
+```
+
+`networkStatus` proves endpoint reachability but does not prove client routing. Connect a client to `localhost:25565` and use `/server external-paper` to prove routing.
+
 ## Properties and defaults
 
 Existing `-P` properties remain the configuration API:
@@ -96,6 +133,11 @@ Existing `-P` properties remain the configuration API:
 | `networkBackend` | `project.name` |
 | `networkBackendPort` | Required by `registerBackend`; must be `1024..65535`. |
 | `networkProxyPort` | `25565`; `0` selects a free port. |
+| `networkLobbyPort` | `30066`; infrastructure lobby port, required to be `1024..65535` and distinct from proxy/backend ports. |
+| `networkTimeout` | `240` seconds; readiness and status-probe timeout. |
+| `networkShutdownTimeout` | `30` seconds; graceful shutdown wait. |
+| `networkControlTimeout` | `5` seconds; authenticated controller request timeout. |
+| `networkServerDir` | Optional external Paper directory; otherwise `runtime/external/<name>` under `networkBase`. |
 | `networkJarTask` | `jar` |
 | `networkDevUsers` | `DEV_NETWORK_DEV_USERS`, then `dev`. |
 | `networkOnlineMode` | Optional `true` or `false`; controls proxy authentication. |

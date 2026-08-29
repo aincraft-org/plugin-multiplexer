@@ -40,6 +40,10 @@ plugins {
 
 The same setup can use a published plugin version through the configured plugin repository. Composite-build and published-plugin consumers execute the same embedded runtime JAR. The plugin extracts `META-INF/development-network/runtime.jar`, verifies its SHA-256 in a content-addressed Gradle-user-home cache, locks extraction, and launches it with `${java.home}/bin/java`. A failed extraction removes only its own temporary file; a verified cache entry is never overwritten.
 
+## Remote CI
+
+On a clean GitHub Actions checkout, CI uses Java 25 and the committed Gradle wrapper. It runs `./gradlew clean check` and then `./gradlew assemble`. This describes the remote build sequence; it does not claim any current remote status.
+
 The runtime uses direct JDK APIs for downloads, archive handling, configuration, process control, sockets, and status probes. It does not use a command interpreter. Explicit typed task arguments form the plugin/runtime protocol; documented environment fallbacks are read only during Gradle configuration.
 
 ## Public tasks
@@ -72,7 +76,39 @@ Long-lived tasks are blocking tasks; registration, unregistration, stop, reload,
 
 `runNetwork` is for a single project's complete stack and is not a multi-project coordination primitive.
 
-## Properties and layout
+### Dedicated shared network / external backend
+
+Use a dedicated `networkBase` for this coordination domain, and start its controller once with explicit, non-conflicting infrastructure ports:
+
+```text
+./gradlew runProxy \
+  -PnetworkBase=run/dedicated-network \
+  -PnetworkProxyPort=25565 \
+  -PnetworkLobbyPort=30069
+```
+
+With an already-running external Paper server listening on backend port `25566`, register it against the active controller. Supply the external Paper files through `networkServerDir` and keep the registration owner stable across runs:
+
+```text
+./gradlew registerBackend \
+  -PnetworkBase=run/dedicated-network \
+  -PnetworkLobbyPort=30069 \
+  -PnetworkBackend=external-paper \
+  -PnetworkBackendPort=25566 \
+  -PnetworkServerDir=run/external-paper \
+  -PnetworkRegistrationOwner=external-paper-owner
+```
+
+Registration uses the active controller's existing proxy configuration, requires `networkLobbyPort` and `networkServerDir` to identify the backend and its files, and never edits or stops Paper. Inspect the endpoints afterward:
+
+```text
+./gradlew networkStatus \
+  -PnetworkBase=run/dedicated-network \
+  -PnetworkProxyPort=25565 \
+  -PnetworkLobbyPort=30069
+```
+
+`networkStatus` proves endpoint reachability but does not prove client routing. Connect a client to `localhost:25565` and use `/server external-paper` to prove routing.
 
 | Property | Default/requirement |
 |---|---|
@@ -80,6 +116,11 @@ Long-lived tasks are blocking tasks; registration, unregistration, stop, reload,
 | `networkBackend` | `project.name` |
 | `networkBackendPort` | Required for external registration; `1024..65535`. |
 | `networkProxyPort` | `25565`; `0` selects a free port. |
+| `networkLobbyPort` | `30066`; infrastructure lobby port, required to be `1024..65535` and distinct from proxy/backend ports. |
+| `networkTimeout` | `240` seconds; readiness and status-probe timeout. |
+| `networkShutdownTimeout` | `30` seconds; graceful shutdown wait. |
+| `networkControlTimeout` | `5` seconds; authenticated controller request timeout. |
+| `networkServerDir` | Optional external Paper directory; otherwise `runtime/external/<name>` under `networkBase`. |
 | `networkJarTask` | `jar`. |
 | `networkDevUsers` | `DEV_NETWORK_DEV_USERS`, then `dev`. |
 | `networkOnlineMode` | Optional `true` or `false`, mapped to proxy online mode. |
