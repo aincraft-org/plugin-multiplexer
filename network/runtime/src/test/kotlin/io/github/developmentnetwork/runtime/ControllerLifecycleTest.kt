@@ -51,7 +51,7 @@ class ControllerLifecycleTest {
         val controller = InfrastructureController(layout, processSupervisor = process)
         val running = thread(start = true) { controller.run(InfrastructureMode.PROXY, request) }
         await(layout.runtimeDir.resolve("proxy.ready"))
-        assertEquals(2, InfrastructureController(layout).run(InfrastructureMode.PROXY, request))
+        assertEquals(1, InfrastructureController(layout).run(InfrastructureMode.PROXY, request))
         assertFalse(Files.exists(layout.backend("owned").pid), "proxy-only mode must not start a registered backend")
         Files.writeString(layout.proxyControlToken, Files.readString(layout.proxyControlToken))
         io.github.developmentnetwork.runtime.controller.ControlClient().request(

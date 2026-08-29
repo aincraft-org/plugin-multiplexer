@@ -26,6 +26,33 @@ class RegistryStore(private val layout: RuntimeLayout) {
     fun readNames(): List<BackendName> = locks.withRegistrationLock {
         readNamesUnlocked()
     }
+    /** Execute one complete registry/config/reload transition under register.lock. */
+    fun <T> withRegistrationTransition(action: RegistrationTransition.() -> T): T =
+        locks.withRegistrationLock { RegistrationTransition().action() }
+
+    /** Operations exposed while [withRegistrationTransition] owns register.lock. */
+    inner class RegistrationTransition internal constructor() {
+        fun readNames(): List<BackendName> = readNamesUnlocked()
+
+        fun readRegistrations(): List<BackendRegistration> =
+            persistedNamesUnlocked().map { name ->
+                readRegistrationUnlocked(name)
+                    ?: error("Registry entry $name has no complete ownership state")
+            }
+
+        fun readRegistration(name: BackendName): BackendRegistration? =
+            readRegistrationUnlocked(name)
+
+        fun readRegistration(raw: String): BackendRegistration? =
+            readRegistrationUnlocked(BackendNames.validate(raw))
+
+        fun register(registration: BackendRegistration) {
+            registerUnlocked(registration)
+        }
+
+        fun unregister(name: BackendName, owner: String): Boolean =
+            unregisterUnlocked(name, owner)
+    }
 
     private fun readNamesUnlocked(): List<BackendName> {
         val lines = AtomicFiles.readLinesIfExists(layout.registryFile) ?: return emptyList()
@@ -57,14 +84,20 @@ class RegistryStore(private val layout: RuntimeLayout) {
     private fun persistedNamesUnlocked(): List<BackendName> {
         val names = readNamesUnlocked().toMutableSet()
         if (!Files.isDirectory(layout.runtimeDir)) return names.sortedBy { it.value }
-        val infrastructureProxyState = setOf(
+        val infrastructureStateFiles = setOf(
             layout.proxyOwner.fileName.toString(),
             layout.proxyPid.fileName.toString(),
+            layout.proxyReady.fileName.toString(),
+            layout.proxyControl.fileName.toString(),
+            layout.proxyControlToken.fileName.toString(),
+            layout.runtimeDir.resolve("proxy.control.lease").fileName.toString(),
+            layout.runtimeDir.resolve("lobby.pid").fileName.toString(),
+            layout.runtimeDir.resolve("lobby.ready").fileName.toString(),
         )
         Files.list(layout.runtimeDir).use { entries ->
             entries.forEach { path ->
                 val fileName = path.fileName.toString()
-                if (fileName in infrastructureProxyState) return@forEach
+                if (fileName in infrastructureStateFiles) return@forEach
                 PERSISTED_STATE_SUFFIXES.firstOrNull { fileName.endsWith(it) }?.let { suffix ->
                     val rawName = fileName.removeSuffix(suffix)
                     if (rawName.isNotEmpty()) names += BackendNames.validate(rawName)
@@ -145,42 +178,47 @@ class RegistryStore(private val layout: RuntimeLayout) {
      * cannot replace an existing name, and no two names may claim one port.
      */
     fun register(registration: BackendRegistration) {
-        locks.withRegistrationLock {
-            val namesBefore = readNamesUnlocked()
-            val persistedNames = persistedNamesUnlocked()
-            val existing = readRegistrationUnlocked(registration.name)
-            if (registration.name in namesBefore && existing == null) {
-                error("Backend ${registration.name} is already registered without owner metadata")
-            }
-            if (existing != null && existing.owner != registration.owner) {
-                error("Backend ${registration.name} is already owned by ${existing.owner}")
-            }
-
-            persistedNames.map { name ->
-                readRegistrationUnlocked(name)
-                    ?: error("Registry entry $name has no complete ownership state")
-            }.forEach { current ->
-                if (current.name != registration.name && current.port == registration.port) {
-                    error("Backend port ${registration.port} is already claimed by ${current.name}")
-                }
-            }
-
-            writeRegistrationState(registration)
-            val names = (namesBefore + registration.name).distinct().sortedBy { it.value }
-            writeNamesUnlocked(names)
-        }
+        locks.withRegistrationLock { registerUnlocked(registration) }
     }
+
+    private fun registerUnlocked(registration: BackendRegistration) {
+        val namesBefore = readNamesUnlocked()
+        val persistedNames = persistedNamesUnlocked()
+        val existing = readRegistrationUnlocked(registration.name)
+        if (registration.name in namesBefore && existing == null) {
+            error("Backend ${registration.name} is already registered without owner metadata")
+        }
+        if (existing != null && existing.owner != registration.owner) {
+            error("Backend ${registration.name} is already owned by ${existing.owner}")
+        }
+
+        persistedNames.map { name ->
+            readRegistrationUnlocked(name)
+                ?: error("Registry entry $name has no complete ownership state")
+        }.forEach { current ->
+            if (current.name != registration.name && current.port == registration.port) {
+                error("Backend port ${registration.port} is already claimed by ${current.name}")
+            }
+        }
+
+        writeRegistrationState(registration)
+        val names = (namesBefore + registration.name).distinct().sortedBy { it.value }
+        writeNamesUnlocked(names)
+    }
+
     /** Remove a registration only when its owner token matches. */
     fun unregister(name: BackendName, owner: String): Boolean =
-        locks.withRegistrationLock {
-            val existing = readRegistrationUnlocked(name) ?: return@withRegistrationLock false
-            require(existing.owner == owner) {
-                "Backend $name is owned by ${existing.owner}, not $owner"
-            }
-            deleteRegistrationState(layout.backend(name), existing.mode)
-            writeNamesUnlocked(readNamesUnlocked().filterNot { it == name })
-            true
+        locks.withRegistrationLock { unregisterUnlocked(name, owner) }
+
+    private fun unregisterUnlocked(name: BackendName, owner: String): Boolean {
+        val existing = readRegistrationUnlocked(name) ?: return false
+        require(existing.owner == owner) {
+            "Backend $name is owned by ${existing.owner}, not $owner"
         }
+        deleteRegistrationState(layout.backend(name), existing.mode)
+        writeNamesUnlocked(readNamesUnlocked().filterNot { it == name })
+        return true
+    }
 
     fun unregister(raw: String, owner: String): Boolean =
         unregister(BackendNames.validate(raw), owner)

@@ -5,6 +5,7 @@ import io.github.developmentnetwork.runtime.config.VelocityConfig
 import io.github.developmentnetwork.runtime.config.VelocityConfigWriter
 import io.github.developmentnetwork.runtime.controller.ControlClient
 import io.github.developmentnetwork.runtime.controller.ControlCommand
+import io.github.developmentnetwork.runtime.controller.ControlServer
 import io.github.developmentnetwork.runtime.model.BackendName
 import io.github.developmentnetwork.runtime.model.BackendRegistration
 import io.github.developmentnetwork.runtime.model.OwnershipMode
@@ -40,79 +41,119 @@ class RegistrationService(
     fun execute(request: RegisterExternalRequest): Int {
         val name = try { BackendName(request.name) } catch (error: Exception) { return fail(error) }
         return try {
-            require(request.owner.isNotBlank() && '\n' !in request.owner && '\r' !in request.owner) { "External owner must be a single line" }
+            require(request.owner.isNotBlank() && '\n' !in request.owner && '\r' !in request.owner) {
+                "External owner must be a single line"
+            }
             require(request.port in 1024..65535) { "External backend port must be in 1024..65535: ${request.port}" }
             require(Files.isDirectory(request.serverDir)) { "External Paper directory does not exist: ${request.serverDir}" }
             require(Files.exists(layout.proxyReady)) { "Proxy controller is not ready" }
-            checkProxyController(request.controlTimeout)
+            checkProxyController()
             val paperResult = preflight.verifyPaper(request.serverDir, external = true)
             require(paperResult.success) { paperResult.message }
             readiness.await(request.host, request.port, request.readinessTimeout)
+
+            val previousConfig = capture(layout.velocityConfig)
+            val previousSecret = capture(layout.forwardingSecret)
+            val previousReady = capture(layout.backend(name).ready)
             val previous = registry.readRegistration(name)
-            val hadReady = Files.exists(layout.backend(name).ready)
             if (previous != null && (previous.owner != request.owner || previous.mode != OwnershipMode.EXTERNAL)) {
                 error("Backend $name is already owned by ${previous.owner}")
             }
+            val candidate = BackendRegistration(name, request.port, request.owner, OwnershipMode.EXTERNAL, null)
+            var generatedConfig: ByteArray? = null
             try {
-                withoutLobbyProcessMarker {
-                    registry.register(BackendRegistration(name, request.port, request.owner, OwnershipMode.EXTERNAL, null))
+                registry.withRegistrationTransition {
+                    register(candidate)
+                    Files.createDirectories(layout.runtimeDir)
+                    AtomicFiles.write(layout.backend(name).ready, "ready\n")
+                    val config = effectiveVelocityConfig(request.targetServer)
+                    velocityWriter.write(layout, config.copy(backendPorts = readRegistrations().associate { it.name.value to it.port }))
+                    generatedConfig = capture(layout.velocityConfig)
                 }
-                Files.createDirectories(layout.runtimeDir)
-                AtomicFiles.write(layout.backend(name).ready, "ready\n")
-                regenerate(request.targetServer)
                 requestReload(request.controlTimeout)
+                0
             } catch (error: Exception) {
-                rollback(name, request.owner, previous, hadReady)
+                rollback(name, request.owner, candidate, previous, previousReady, previousConfig, previousSecret, generatedConfig)
                 throw error
             }
-            0
         } catch (error: Exception) {
             fail(error)
         }
     }
 
-    private fun checkProxyController(timeout: Duration) {
+    private fun checkProxyController() {
         require(Files.exists(layout.proxyControl)) { "Proxy controller control socket is unavailable" }
-        require(Files.exists(io.github.developmentnetwork.runtime.controller.ControlServer.tokenPath(layout.proxyControl))) {
+        require(Files.exists(ControlServer.tokenPath(layout.proxyControl))) {
             "Proxy controller authentication token is unavailable"
         }
-        require(Files.exists(io.github.developmentnetwork.runtime.controller.ControlServer.leasePath(layout.proxyControl))) {
+        require(Files.exists(ControlServer.leasePath(layout.proxyControl))) {
             "Proxy controller lease is unavailable"
         }
     }
 
     private fun requestReload(timeout: Duration) {
-        val token = Files.readString(io.github.developmentnetwork.runtime.controller.ControlServer.tokenPath(layout.proxyControl)).trim()
+        val token = Files.readString(ControlServer.tokenPath(layout.proxyControl)).trim()
         val response = controlClient.request(layout.proxyControl, token, ControlCommand.Reload, timeout)
         require(response.ok) { response.message.ifBlank { "proxy reload was rejected" } }
     }
 
-    private fun regenerate(targetServer: String) {
-        val ports = registry.readNames().mapNotNull { name -> registry.readRegistration(name)?.let { name.value to it.port } }.toMap()
-        velocityWriter.write(layout, VelocityConfig(targetServer = targetServer, backendPorts = ports))
+    /** Preserve an existing custom proxy bind/target/online mode during metadata-only changes. */
+    private fun effectiveVelocityConfig(requestTarget: String): VelocityConfig {
+        val existing = capture(layout.velocityConfig)?.toString(Charsets.UTF_8)
+        val existingPort = existing?.let { readInt(it, "bind") }
+        val existingTarget = existing?.let { readLobbyTarget(it) }
+        val existingOnline = existing?.let { readBoolean(it, "online-mode") }
+        return VelocityConfig(
+            proxyPort = existingPort ?: 25565,
+            targetServer = if (requestTarget == "localhost" && existingTarget != null) existingTarget else requestTarget,
+            onlineMode = existingOnline ?: false,
+        )
     }
 
-    private fun rollback(name: BackendName, owner: String, previous: BackendRegistration?, hadReady: Boolean) {
-        runCatching { registry.unregister(name, owner) }
-        if (previous != null) runCatching { registry.register(previous) }
-        if (hadReady) AtomicFiles.write(layout.backend(name).ready, "ready\n") else Files.deleteIfExists(layout.backend(name).ready)
-    }
-    /**
-     * RegistryStore predates the controller's lobby.pid marker and discovers any
-     * *.pid file as a backend claim. Hide only that known infrastructure marker
-     * during its locked transition, restoring the exact marker in all outcomes.
-     */
-    private fun <T> withoutLobbyProcessMarker(action: () -> T): T {
-        val marker = layout.runtimeDir.resolve("lobby.pid")
-        if (!Files.exists(marker)) return action()
-        val hidden = layout.base.resolve(".lobby.pid-registration-${ProcessHandle.current().pid()}-${System.nanoTime()}")
-        Files.move(marker, hidden)
-        return try {
-            action()
-        } finally {
-            if (Files.exists(hidden)) Files.move(hidden, marker)
+    private fun rollback(
+        name: BackendName,
+        owner: String,
+        candidate: BackendRegistration,
+        previous: BackendRegistration?,
+        previousReady: ByteArray?,
+        previousConfig: ByteArray?,
+        previousSecret: ByteArray?,
+        generatedConfig: ByteArray?,
+    ) {
+        runCatching {
+            registry.withRegistrationTransition {
+                val current = readRegistration(name)
+                if (current == candidate) {
+                    if (previous == null) unregister(name, owner) else register(previous)
+                    restore(layout.backend(name).ready, previousReady)
+                }
+            }
+        }
+        if (generatedConfig == null || capture(layout.velocityConfig)?.contentEquals(generatedConfig) == true) {
+            restore(layout.velocityConfig, previousConfig)
+            restore(layout.forwardingSecret, previousSecret)
         }
     }
+
+    private fun capture(path: Path): ByteArray? =
+        if (Files.exists(path)) Files.readAllBytes(path) else null
+
+    private fun restore(path: Path, content: ByteArray?) {
+        if (content == null) Files.deleteIfExists(path)
+        else AtomicFiles.write(path, content.toString(Charsets.UTF_8))
+    }
+
+    private fun readInt(content: String, key: String): Int? =
+        Regex("^$key\\s*=\\s*\\\"[^:]+:(\\d+)\\\"", RegexOption.MULTILINE)
+            .find(content)?.groupValues?.get(1)?.toIntOrNull()
+
+    private fun readBoolean(content: String, key: String): Boolean? =
+        Regex("^$key\\s*=\\s*(true|false)\\s*$", RegexOption.MULTILINE)
+            .find(content)?.groupValues?.get(1)?.toBooleanStrictOrNull()
+
+    private fun readLobbyTarget(content: String): String? =
+        Regex("^lobby\\s*=\\s*\\\"([^:]+):\\d+\\\"", RegexOption.MULTILINE)
+            .find(content)?.groupValues?.get(1)
 
     private fun fail(error: Exception): Int {
         System.err.println("external registration: ${error.message ?: error::class.simpleName}")

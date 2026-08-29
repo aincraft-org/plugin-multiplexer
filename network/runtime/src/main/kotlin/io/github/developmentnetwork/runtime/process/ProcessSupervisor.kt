@@ -48,6 +48,8 @@ class ProcessSupervisor(
 
         val process = ProcessBuilder(command)
             .directory(cwd.toFile())
+            .redirectOutput(ProcessBuilder.Redirect.INHERIT)
+            .redirectError(ProcessBuilder.Redirect.INHERIT)
             .start()
         return try {
             val identity = identityReader.capture(process, cwd)
@@ -85,7 +87,8 @@ class ProcessSupervisor(
         require(!timeout.isNegative) { "Termination timeout must not be negative" }
         if (!process.process.isAlive) {
             // A dead root cannot be used to perform a final descendant
-            // observation. Its children may already have been reparented.
+            // observation. Its children may already have been reparented, so
+            // no successful termination claim is safe.
             return TerminationResult.NOT_OWNED
         }
         if (!safeMatches(process.identity)) return TerminationResult.NOT_OWNED

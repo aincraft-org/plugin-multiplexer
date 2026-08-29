@@ -1,5 +1,6 @@
 package io.github.developmentnetwork.runtime
 
+import io.github.developmentnetwork.runtime.artifact.LobbyMapOptions
 import io.github.developmentnetwork.runtime.controller.InfrastructureController
 import io.github.developmentnetwork.runtime.controller.InfrastructureMode
 import io.github.developmentnetwork.runtime.controller.InfrastructureRequest
@@ -18,6 +19,8 @@ import io.github.developmentnetwork.runtime.service.StopService
 import io.github.developmentnetwork.runtime.service.UnregisterExternalRequest
 import io.github.developmentnetwork.runtime.service.UnregistrationService
 import io.github.developmentnetwork.runtime.state.RuntimeLayout
+import io.github.developmentnetwork.runtime.model.BackendName
+import java.net.URI
 import java.nio.file.Path
 import java.time.Duration
 import kotlin.system.exitProcess
@@ -45,6 +48,9 @@ private val supportedCommands = setOf(
     "stop-network", "reload-network", "restart-backend", "network-status",
 )
 
+private val settingName = Regex("[A-Za-z][A-Za-z0-9_.-]*")
+private val checksum = Regex("[0-9a-f]{64}")
+
 /** Parse one command token followed by deterministic --key=value settings. */
 fun parseRuntimeRequest(arguments: List<String>): RuntimeRequest {
     require(arguments.isNotEmpty()) { "Missing runtime command" }
@@ -53,11 +59,13 @@ fun parseRuntimeRequest(arguments: List<String>): RuntimeRequest {
     require(command in supportedCommands) { "Unknown command: $command" }
     val settings = LinkedHashMap<String, String>()
     arguments.drop(1).forEach { argument ->
-        require(argument.startsWith("--")) { "Expected a --key=value setting after command $command, got: $argument" }
+        require(argument.startsWith("--")) {
+            "Expected a --key=value setting after command $command, got: $argument"
+        }
         val separator = argument.indexOf('=', startIndex = 2)
         require(separator > 2) { "Expected a --key=value setting, got: $argument" }
         val key = argument.substring(2, separator)
-        require(key.matches(Regex("[A-Za-z][A-Za-z0-9_.-]*"))) { "Invalid runtime setting name: $key" }
+        require(settingName.matches(key)) { "Invalid runtime setting name: $key" }
         require(key !in settings) { "Duplicate runtime setting: $key" }
         val value = argument.substring(separator + 1)
         require('\n' !in value && '\r' !in value) { "Runtime setting $key must be a single line" }
@@ -67,62 +75,300 @@ fun parseRuntimeRequest(arguments: List<String>): RuntimeRequest {
 }
 
 /** Convert a parsed envelope into a typed request, rejecting absent/malformed values. */
-fun parseRuntimeCommand(arguments: List<String>): RuntimeCommand = parseRuntimeCommand(parseRuntimeRequest(arguments))
+fun parseRuntimeCommand(arguments: List<String>): RuntimeCommand =
+    parseRuntimeCommand(parseRuntimeRequest(arguments))
 
 fun parseRuntimeCommand(request: RuntimeRequest): RuntimeCommand {
     val command = request.command
-    val s = request.settings
-    val base = Path.of(required(s, "base"))
-    val target = s["target-server"] ?: "localhost"
-    val proxyPort = int(s, "proxy-port", 25565)
-    val lobbyPort = int(s, "lobby-port", 30066)
-    val timeout = durationSeconds(s, "timeout", 240)
-    val shutdownTimeout = durationSeconds(s, "shutdown-timeout", 30)
-    val onlineMode = bool(s, "online-mode", true)
-    val owner = s["owner"] ?: s["registration-owner"] ?: "runtime-${ProcessHandle.current().pid()}"
-    val name = s["name"] ?: s["backend"] ?: s["network-backend"]
-    return when (command) {
-        "runProxy", "serve-proxy" -> RuntimeCommand.ServeProxy(InfrastructureRequest(proxyPort = proxyPort, lobbyPort = lobbyPort, targetServer = target, onlineMode = onlineMode, owner = owner, readinessTimeout = timeout, shutdownTimeout = shutdownTimeout))
-        "runNetwork", "serve-full" -> RuntimeCommand.ServeFull(InfrastructureRequest(proxyPort = proxyPort, lobbyPort = lobbyPort, targetServer = target, onlineMode = onlineMode, owner = owner, backendName = requiredValue(name, "name"), backendPort = optionalInt(s, "backend-port"), backendOwner = owner, backendWorkDir = s["backend-dir"]?.let(Path::of), readinessTimeout = timeout, shutdownTimeout = shutdownTimeout))
-        "runBackend", "serve-backend" -> RuntimeCommand.ServeBackend(ManagedBackendRequest(requiredValue(name, "name"), owner, int(s, "backend-port", requiredInt(s, "port")), Path.of(s["backend-dir"] ?: base.resolve("runtime/auto/${requiredValue(name, "name")}").toString()), readinessTimeout = timeout, shutdownTimeout = shutdownTimeout))
-        "registerBackend", "register-external" -> RuntimeCommand.RegisterExternal(RegisterExternalRequest(requiredValue(name, "name"), requiredInt(s, "port"), requiredValue(s["registration-owner"] ?: s["owner"], "owner"), Path.of(required(s, "server-dir")), targetServer = target, readinessTimeout = timeout, controlTimeout = shutdownTimeout))
-        "unregisterBackend", "unregister-external" -> RuntimeCommand.UnregisterExternal(UnregisterExternalRequest(requiredValue(name, "name"), requiredValue(s["registration-owner"] ?: s["owner"], "owner"), targetServer = target, controlTimeout = shutdownTimeout))
-        "stopNetwork", "stop-network" -> RuntimeCommand.StopNetwork(StopNetworkRequest(s["owner"], controlTimeout = shutdownTimeout, shutdownTimeout = timeout))
-        "reloadNetwork", "reload-network" -> RuntimeCommand.ReloadNetwork(ReloadNetworkRequest(target, proxyPort, onlineMode, shutdownTimeout))
-        "restartBackend", "restart-backend" -> RuntimeCommand.RestartBackend(RestartBackendRequest(requiredValue(name, "name"), owner, optionalInt(s, "backend-port"), s["backend-dir"]?.let(Path::of), readinessTimeout = timeout, shutdownTimeout = shutdownTimeout))
-        "networkStatus", "network-status" -> RuntimeCommand.NetworkStatus(NetworkStatusRequest(target, optionalInt(s, "proxy-port"), lobbyPort, timeout))
+    require(command in supportedCommands) { "Unknown command: $command" }
+    val settings = request.settings
+    settings.keys.forEach { require(settingName.matches(it)) { "Invalid runtime setting name: $it" } }
+    val base = Path.of(required(settings, "base"))
+    val target = oneSetting(settings, "target-server", "host") ?: "localhost"
+    val proxyPort = port(settings, "proxy-port", default = 25565, allowZero = true)
+    val lobbyPort = port(settings, "lobby-port", default = 30066)
+    val readinessTimeout = durationSeconds(settings, "timeout", 240)
+    val shutdownTimeout = durationSeconds(settings, "shutdown-timeout", 30)
+    val controlTimeout = durationSeconds(settings, "control-timeout", 5)
+    val onlineMode = bool(settings, "online-mode", false)
+    val owner = optionalOwner(settings) ?: "runtime-${ProcessHandle.current().pid()}"
+    val name = oneSetting(settings, "name", "backend", "network-backend")
+    val mapOptions = parseMapOptions(settings)
+
+    when (command) {
+        "runProxy", "serve-proxy" -> {
+            requireKeys(command, settings, PROXY_KEYS)
+            return RuntimeCommand.ServeProxy(
+                InfrastructureRequest(
+                    proxyPort = proxyPort,
+                    lobbyPort = lobbyPort,
+                    targetServer = target,
+                    onlineMode = onlineMode,
+                    owner = owner,
+                    readinessTimeout = readinessTimeout,
+                    shutdownTimeout = shutdownTimeout,
+                    mapOptions = mapOptions,
+                    devUsers = users(settings),
+                ),
+            )
+        }
+        "runNetwork", "serve-full" -> {
+            requireKeys(command, settings, FULL_KEYS)
+            val backendName = validatedName(name)
+            return RuntimeCommand.ServeFull(
+                InfrastructureRequest(
+                    proxyPort = proxyPort,
+                    lobbyPort = lobbyPort,
+                    targetServer = target,
+                    onlineMode = onlineMode,
+                    owner = owner,
+                    backendName = backendName.value,
+                    backendPort = optionalPort(settings, "backend-port", "port"),
+                    backendOwner = owner,
+                    backendWorkDir = settings["backend-dir"]?.let(Path::of),
+                    readinessTimeout = readinessTimeout,
+                    shutdownTimeout = shutdownTimeout,
+                    mapOptions = mapOptions,
+                    devUsers = users(settings),
+                ),
+            )
+        }
+        "runBackend", "serve-backend" -> {
+            requireKeys(command, settings, BACKEND_KEYS)
+            val backendName = validatedName(name)
+            val backendPort = requiredPort(settings, "backend-port", "port")
+            val workDir = settings["backend-dir"]?.let(Path::of)
+                ?: base.resolve("runtime/auto/${backendName.value}")
+            return RuntimeCommand.ServeBackend(
+                ManagedBackendRequest(
+                    name = backendName.value,
+                    owner = owner,
+                    port = backendPort,
+                    workDir = workDir,
+                    readinessTimeout = readinessTimeout,
+                    shutdownTimeout = shutdownTimeout,
+                    devUsers = users(settings),
+                ),
+            )
+        }
+        "registerBackend", "register-external" -> {
+            requireKeys(command, settings, EXTERNAL_REGISTER_KEYS)
+            val backendName = validatedName(name)
+            val registrationOwner = requiredOwner(settings)
+            return RuntimeCommand.RegisterExternal(
+                RegisterExternalRequest(
+                    name = backendName.value,
+                    port = requiredPort(settings, "port"),
+                    owner = registrationOwner,
+                    serverDir = Path.of(required(settings, "server-dir")),
+                    host = settings["host"] ?: "localhost",
+                    targetServer = target,
+                    readinessTimeout = readinessTimeout,
+                    controlTimeout = controlTimeout,
+                ),
+            )
+        }
+        "unregisterBackend", "unregister-external" -> {
+            requireKeys(command, settings, EXTERNAL_UNREGISTER_KEYS)
+            val backendName = validatedName(name)
+            return RuntimeCommand.UnregisterExternal(
+                UnregisterExternalRequest(
+                    name = backendName.value,
+                    owner = requiredOwner(settings),
+                    targetServer = target,
+                    controlTimeout = controlTimeout,
+                ),
+            )
+        }
+        "stopNetwork", "stop-network" -> {
+            requireKeys(command, settings, STOP_KEYS)
+            return RuntimeCommand.StopNetwork(
+                StopNetworkRequest(
+                    owner = settings["owner"],
+                    controlTimeout = controlTimeout,
+                    shutdownTimeout = shutdownTimeout,
+                ),
+            )
+        }
+        "reloadNetwork", "reload-network" -> {
+            requireKeys(command, settings, RELOAD_KEYS)
+            return RuntimeCommand.ReloadNetwork(
+                ReloadNetworkRequest(
+                    targetServer = target,
+                    proxyPort = proxyPort,
+                    onlineMode = onlineMode,
+                    controlTimeout = controlTimeout,
+                ),
+            )
+        }
+        "restartBackend", "restart-backend" -> {
+            requireKeys(command, settings, RESTART_KEYS)
+            val backendName = validatedName(name)
+            return RuntimeCommand.RestartBackend(
+                RestartBackendRequest(
+                    name = backendName.value,
+                    owner = requiredOwner(settings),
+                    port = optionalPort(settings, "backend-port", "port"),
+                    workDir = settings["backend-dir"]?.let(Path::of),
+                    pluginJar = settings["plugin-jar"]?.let(Path::of),
+                    readinessTimeout = readinessTimeout,
+                    shutdownTimeout = shutdownTimeout,
+                ),
+            )
+        }
+        "networkStatus", "network-status" -> {
+            requireKeys(command, settings, STATUS_KEYS)
+            return RuntimeCommand.NetworkStatus(
+                NetworkStatusRequest(
+                    host = target,
+                    proxyPort = settings["proxy-port"]?.let { port(settings, "proxy-port", null, allowZero = false) },
+                    lobbyPort = lobbyPort,
+                    timeout = readinessTimeout,
+                ),
+            )
+        }
         else -> error("Unknown command: $command")
     }
 }
 
 /** Execute a typed request and return its stable operation exit code. */
-fun runRuntime(arguments: List<String>): Int = try {
-    val parsed = parseRuntimeCommand(arguments)
-    when (parsed) {
-        is RuntimeCommand.ServeProxy -> InfrastructureController(RuntimeLayout(Path.of(required(parseRuntimeRequest(arguments).settings, "base")))).run(InfrastructureMode.PROXY, parsed.request)
-        is RuntimeCommand.ServeFull -> InfrastructureController(RuntimeLayout(Path.of(required(parseRuntimeRequest(arguments).settings, "base")))).run(InfrastructureMode.FULL, parsed.request)
-        is RuntimeCommand.ServeBackend -> ManagedBackendController(RuntimeLayout(Path.of(required(parseRuntimeRequest(arguments).settings, "base")))).run(parsed.request)
-        is RuntimeCommand.RegisterExternal -> RegistrationService(RuntimeLayout(Path.of(required(parseRuntimeRequest(arguments).settings, "base")))).execute(parsed.request)
-        is RuntimeCommand.UnregisterExternal -> UnregistrationService(RuntimeLayout(Path.of(required(parseRuntimeRequest(arguments).settings, "base")))).execute(parsed.request)
-        is RuntimeCommand.StopNetwork -> StopService(RuntimeLayout(Path.of(required(parseRuntimeRequest(arguments).settings, "base")))).execute(parsed.request)
-        is RuntimeCommand.ReloadNetwork -> ReloadService(RuntimeLayout(Path.of(required(parseRuntimeRequest(arguments).settings, "base")))).execute(parsed.request)
-        is RuntimeCommand.RestartBackend -> RestartService(RuntimeLayout(Path.of(required(parseRuntimeRequest(arguments).settings, "base")))).execute(parsed.request)
-        is RuntimeCommand.NetworkStatus -> StatusService(RuntimeLayout(Path.of(required(parseRuntimeRequest(arguments).settings, "base")))).execute(parsed.request)
+fun runRuntime(arguments: List<String>): Int {
+    val parsed = try {
+        val envelope = parseRuntimeRequest(arguments)
+        parseRuntimeCommand(envelope) to RuntimeLayout(Path.of(required(envelope.settings, "base")))
+    } catch (error: IllegalArgumentException) {
+        System.err.println("Runtime request error: ${error.message ?: "invalid request"}")
+        return 2
     }
-} catch (error: IllegalArgumentException) {
-    System.err.println("Runtime request error: ${error.message ?: "invalid request"}")
-    2
-} catch (error: Exception) {
-    System.err.println("Runtime operation error: ${error.message ?: error::class.simpleName}")
-    1
+    val command = parsed.first
+    val layout = parsed.second
+    return try {
+        when (command) {
+            is RuntimeCommand.ServeProxy -> InfrastructureController(layout).run(InfrastructureMode.PROXY, command.request)
+            is RuntimeCommand.ServeFull -> InfrastructureController(layout).run(InfrastructureMode.FULL, command.request)
+            is RuntimeCommand.ServeBackend -> ManagedBackendController(layout).run(command.request)
+            is RuntimeCommand.RegisterExternal -> RegistrationService(layout).execute(command.request)
+            is RuntimeCommand.UnregisterExternal -> UnregistrationService(layout).execute(command.request)
+            is RuntimeCommand.StopNetwork -> StopService(layout).execute(command.request)
+            is RuntimeCommand.ReloadNetwork -> ReloadService(layout).execute(command.request)
+            is RuntimeCommand.RestartBackend -> RestartService(layout).execute(command.request)
+            is RuntimeCommand.NetworkStatus -> StatusService(layout).execute(command.request)
+        }
+    } catch (error: Exception) {
+        System.err.println("Runtime operation error: ${error.message ?: error::class.simpleName}")
+        1
+    }
 }
 
 fun main(arguments: Array<String>) { exitProcess(runRuntime(arguments.toList())) }
 
-private fun required(settings: Map<String, String>, key: String): String = requiredValue(settings[key], key)
-private fun requiredValue(value: String?, key: String): String = value?.takeIf { it.isNotBlank() } ?: throw IllegalArgumentException("Missing required --$key setting")
-private fun requiredInt(settings: Map<String, String>, key: String): Int = int(settings, key, null)
-private fun int(settings: Map<String, String>, key: String, default: Int?): Int = settings[key]?.toIntOrNull()?.also { require(it in 1024..65535) { "Invalid --$key value: ${settings[key]}" } } ?: default ?: throw IllegalArgumentException("Missing or invalid --$key setting")
-private fun optionalInt(settings: Map<String, String>, key: String): Int? = settings[key]?.toIntOrNull()?.also { require(it in 1024..65535) { "Invalid --$key value: ${settings[key]}" } }
-private fun bool(settings: Map<String, String>, key: String, default: Boolean): Boolean = settings[key]?.let { when (it) { "true" -> true; "false" -> false; else -> throw IllegalArgumentException("Invalid --$key value: $it") } } ?: default
-private fun durationSeconds(settings: Map<String, String>, key: String, default: Long): Duration = Duration.ofSeconds(settings[key]?.toLongOrNull()?.also { require(it > 0) { "Invalid --$key value: ${settings[key]}" } } ?: default)
+private val PROXY_KEYS = setOf(
+    "base", "target-server", "host", "proxy-port", "lobby-port", "online-mode", "owner",
+    "registration-owner", "timeout", "shutdown-timeout", "lobby-map-url", "lobby-map-sha256",
+    "lobby-map-random-url", "dev-users",
+)
+private val FULL_KEYS = PROXY_KEYS + setOf("name", "backend", "network-backend", "backend-port", "port", "backend-dir")
+private val BACKEND_KEYS = setOf(
+    "base", "name", "backend", "network-backend", "backend-port", "port", "backend-dir", "owner",
+    "registration-owner", "timeout", "shutdown-timeout", "dev-users",
+)
+private val EXTERNAL_REGISTER_KEYS = setOf(
+    "base", "name", "backend", "network-backend", "port", "registration-owner", "owner", "server-dir",
+    "target-server", "host", "timeout", "control-timeout",
+)
+private val EXTERNAL_UNREGISTER_KEYS = setOf(
+    "base", "name", "backend", "network-backend", "registration-owner", "owner", "target-server", "host",
+    "control-timeout",
+)
+private val STOP_KEYS = setOf("base", "owner", "control-timeout", "shutdown-timeout")
+private val RELOAD_KEYS = setOf("base", "target-server", "host", "proxy-port", "online-mode", "control-timeout")
+private val RESTART_KEYS = setOf(
+    "base", "name", "backend", "network-backend", "owner", "registration-owner", "backend-port", "port",
+    "backend-dir", "plugin-jar", "timeout", "shutdown-timeout",
+)
+private val STATUS_KEYS = setOf("base", "target-server", "host", "proxy-port", "lobby-port", "timeout")
+
+private fun requireKeys(command: String, settings: Map<String, String>, allowed: Set<String>) {
+    val unknown = settings.keys - allowed
+    require(unknown.isEmpty()) { "Setting(s) ${unknown.sorted().joinToString()} are not valid for $command" }
+}
+
+private fun required(settings: Map<String, String>, key: String): String =
+    settings[key]?.takeIf { it.isNotBlank() } ?: throw IllegalArgumentException("Missing required --$key setting")
+
+private fun oneSetting(settings: Map<String, String>, vararg keys: String): String? {
+    val present = keys.filter { settings.containsKey(it) }
+    require(present.size <= 1) { "Incompatible settings: ${present.joinToString(" and ")}" }
+    return present.firstOrNull()?.let { required(settings, it) }
+}
+
+private fun optionalOwner(settings: Map<String, String>): String? =
+    oneSetting(settings, "owner", "registration-owner")?.also { validateOwner(it) }
+
+private fun requiredOwner(settings: Map<String, String>): String =
+    optionalOwner(settings) ?: throw IllegalArgumentException("Missing required --registration-owner setting")
+
+private fun validateOwner(owner: String) {
+    require(owner.isNotBlank() && '\n' !in owner && '\r' !in owner) { "Owner must be a non-blank single line" }
+}
+
+private fun validatedName(raw: String?): BackendName =
+    BackendName(raw?.takeIf { it.isNotBlank() } ?: throw IllegalArgumentException("Missing required --name setting"))
+
+private fun port(settings: Map<String, String>, key: String, default: Int?, allowZero: Boolean = false): Int {
+    val raw = settings[key] ?: return default ?: throw IllegalArgumentException("Missing required --$key setting")
+    val parsed = raw.toIntOrNull() ?: throw IllegalArgumentException("Invalid --$key value: $raw")
+    val minimum = if (allowZero) 0 else 1024
+    require(parsed in minimum..65535) { "Invalid --$key value: $raw" }
+    return parsed
+}
+
+private fun optionalPort(settings: Map<String, String>, vararg keys: String): Int? =
+    oneSetting(settings, *keys)?.let { raw ->
+        val parsed = raw.toIntOrNull() ?: throw IllegalArgumentException("Invalid backend port value: $raw")
+        require(parsed in 1024..65535) { "Invalid backend port value: $raw" }
+        parsed
+    }
+
+private fun requiredPort(settings: Map<String, String>, vararg keys: String): Int =
+    optionalPort(settings, *keys) ?: throw IllegalArgumentException("Missing required --${keys.first()} setting")
+
+private fun bool(settings: Map<String, String>, key: String, default: Boolean): Boolean =
+    settings[key]?.let { when (it) {
+        "true" -> true
+        "false" -> false
+        else -> throw IllegalArgumentException("Invalid --$key value: $it")
+    } } ?: default
+
+private fun durationSeconds(settings: Map<String, String>, key: String, default: Long): Duration {
+    val raw = settings[key] ?: return Duration.ofSeconds(default)
+    val seconds = raw.toLongOrNull() ?: throw IllegalArgumentException("Invalid --$key value: $raw")
+    require(seconds > 0) { "Invalid --$key value: $raw" }
+    return Duration.ofSeconds(seconds)
+}
+
+private fun users(settings: Map<String, String>): List<String> =
+    settings["dev-users"]?.split(',')?.map(String::trim)?.filter(String::isNotEmpty)?.also {
+        require(it.isNotEmpty()) { "--dev-users must contain at least one user" }
+    } ?: listOf("dev")
+
+private fun parseMapOptions(settings: Map<String, String>): LobbyMapOptions {
+    val staticUrl = settings["lobby-map-url"]?.let { uriSetting("lobby-map-url", it) }
+    val staticSha = settings["lobby-map-sha256"]
+    val randomUrl = settings["lobby-map-random-url"]?.let { uriSetting("lobby-map-random-url", it) }
+    require(staticUrl == null == (staticSha == null)) {
+        "Static lobby map mode requires both --lobby-map-url and --lobby-map-sha256"
+    }
+    if (staticSha != null) require(checksum.matches(staticSha)) {
+        "Invalid --lobby-map-sha256 value; expected exactly 64 lowercase hexadecimal characters"
+    }
+    require(randomUrl == null || staticUrl == null) {
+        "--lobby-map-random-url is incompatible with static lobby map settings"
+    }
+    return LobbyMapOptions(staticUrl = staticUrl, staticSha256 = staticSha, randomUrl = randomUrl)
+}
+
+private fun uriSetting(key: String, raw: String): URI {
+    require(raw.isNotBlank()) { "Invalid --$key value: blank URL" }
+    return URI.create(raw).also { uri -> require(uri.isAbsolute) { "Invalid --$key value: URL must be absolute" } }
+}

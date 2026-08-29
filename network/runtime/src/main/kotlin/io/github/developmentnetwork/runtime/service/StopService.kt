@@ -3,16 +3,17 @@ package io.github.developmentnetwork.runtime.service
 import io.github.developmentnetwork.runtime.controller.ControlClient
 import io.github.developmentnetwork.runtime.controller.ControlCommand
 import io.github.developmentnetwork.runtime.controller.ControlServer
-import io.github.developmentnetwork.runtime.model.BackendName
-import io.github.developmentnetwork.runtime.model.OwnershipMode
 import io.github.developmentnetwork.runtime.model.ProcessIdentity
+import io.github.developmentnetwork.runtime.model.OwnershipMode
 import io.github.developmentnetwork.runtime.process.ProcessIdentityReader
 import io.github.developmentnetwork.runtime.registry.RegistryStore
 import io.github.developmentnetwork.runtime.state.AtomicFiles
 import io.github.developmentnetwork.runtime.state.RuntimeLayout
 import java.nio.file.Files
+import java.nio.file.LinkOption.NOFOLLOW_LINKS
 import java.nio.file.Path
 import java.time.Duration
+import java.time.Instant
 
 /** Stop request. An owner, when supplied, narrows fallback cleanup to that run. */
 data class StopNetworkRequest(
@@ -29,11 +30,16 @@ class StopService(
     private val registry: RegistryStore = RegistryStore(layout),
 ) {
     fun execute(request: StopNetworkRequest = StopNetworkRequest()): Int {
-        val requested = request.owner
-        if (requestController(request)) {
-            if (awaitLeaseGone(request.controlTimeout)) return 0
+        val controllerRequested = requestController(request)
+        if (controllerRequested) {
+            // A successful request is not completion. Never signal a second process while
+            // the serving controller's lease is still present or cannot be classified.
+            return if (awaitLeaseGone(request.controlTimeout)) 0 else 1
         }
-        return if (fallback(request)) 0 else 1
+        return when (leaseState()) {
+            LeaseState.LIVE, LeaseState.UNKNOWN -> 1
+            LeaseState.ABSENT, LeaseState.DEAD -> if (fallback(request)) 0 else 1
+        }
     }
 
     private fun requestController(request: StopNetworkRequest): Boolean {
@@ -50,34 +56,73 @@ class StopService(
     }
 
     private fun awaitLeaseGone(timeout: Duration): Boolean {
-        val deadline = System.nanoTime() + timeout.toNanos().coerceAtLeast(0)
+        val deadline = deadline(timeout)
         val lease = ControlServer.leasePath(layout.proxyControl)
         while (System.nanoTime() < deadline) {
-            if (!Files.exists(lease)) return true
-            try { Thread.sleep(25) } catch (_: InterruptedException) {
+            if (!Files.exists(lease, NOFOLLOW_LINKS)) return true
+            try {
+                Thread.sleep(25)
+            } catch (_: InterruptedException) {
                 Thread.currentThread().interrupt()
                 return false
             }
         }
-        return !Files.exists(lease)
+        return !Files.exists(lease, NOFOLLOW_LINKS)
+    }
+
+    /** Fallback must classify a persisted lease before it can inspect owner state. */
+    private fun leaseState(): LeaseState {
+        val lease = ControlServer.leasePath(layout.proxyControl)
+        if (!Files.exists(lease, NOFOLLOW_LINKS)) return LeaseState.ABSENT
+        if (Files.isSymbolicLink(lease) || !Files.isRegularFile(lease, NOFOLLOW_LINKS)) return LeaseState.UNKNOWN
+        val content = runCatching { Files.readString(lease) }.getOrElse { return LeaseState.UNKNOWN }
+        val values = content.lineSequence().map { it.removeSuffix("\r") }.filter { it.isNotEmpty() }.toList()
+        if (values.size != 3) return LeaseState.UNKNOWN
+        val parsed = mutableMapOf<String, String>()
+        for (line in values) {
+            val separator = line.indexOf('=')
+            if (separator <= 0 || parsed.put(line.substring(0, separator), line.substring(separator + 1)) != null) {
+                return LeaseState.UNKNOWN
+            }
+        }
+        if (parsed.keys != setOf("pid", "start", "token")) return LeaseState.UNKNOWN
+        val pid = parsed["pid"]?.toLongOrNull() ?: return LeaseState.UNKNOWN
+        val start = runCatching { Instant.parse(parsed["start"] ?: return LeaseState.UNKNOWN) }.getOrElse { return LeaseState.UNKNOWN }
+        if (parsed["token"].isNullOrBlank()) return LeaseState.UNKNOWN
+        val handle = try { ProcessHandle.of(pid).orElse(null) } catch (_: Exception) { return LeaseState.UNKNOWN }
+            ?: return LeaseState.DEAD
+        if (!handle.isAlive) return LeaseState.DEAD
+        val actualStart = runCatching { handle.info().startInstant().orElse(null) }.getOrNull()
+            ?: return LeaseState.UNKNOWN
+        return if (actualStart == start) LeaseState.LIVE else LeaseState.DEAD
     }
 
     private fun fallback(request: StopNetworkRequest): Boolean {
-        val ownerState = AtomicFiles.readIfExists(layout.proxyOwner).orEmpty()
+        val ownerState = AtomicFiles.readIfExists(layout.proxyOwner) ?: return false
         val owner = readKey(ownerState, "owner") ?: return false
-        request.owner?.let { require(it == owner) { "Controller owner mismatch" } }
-        val childIdentity = readIdentity(ownerState, "child")
-        if (childIdentity != null && !terminateVerified(childIdentity, request.shutdownTimeout)) return false
-        val lobbyIdentity = readIdentity(ownerState, "lobby")
-        if (lobbyIdentity != null && !terminateVerified(lobbyIdentity, request.shutdownTimeout)) return false
+        request.owner?.let { if (it != owner) return false }
 
-        registry.readNames().mapNotNull { name -> registry.readRegistration(name) }
-            .filter { it.mode == OwnershipMode.MANAGED && it.owner == owner }
-            .forEach { registration ->
-                val identity = registration.process ?: return@forEach
-                if (!terminateVerified(identity, request.shutdownTimeout)) return false
-                runCatching { registry.unregister(registration.name, owner) }
-            }
+        // Parse and verify every identity before sending any signal. This prevents a
+        // later indeterminate record from leaving an earlier process silently cleaned.
+        val childIdentity = readRequiredIdentity(ownerState, "child") ?: return false
+        val lobbyIdentity = readRequiredIdentity(ownerState, "lobby") ?: return false
+        val managed = try {
+            registry.readRegistrations().filter { it.mode == OwnershipMode.MANAGED && it.owner == owner }
+        } catch (_: Exception) {
+            return false
+        }
+        val managedIdentities = managed.map { it to (it.process ?: return false) }
+        val identities = listOf(childIdentity, lobbyIdentity) + managedIdentities.map { it.second }
+        if (identities.any { !identityReader.matches(it) }) return false
+
+        // Preserve all state as evidence if any termination fails. Only after every
+        // owned identity has been observed dead are lease markers removed.
+        if (!terminateVerified(childIdentity, request.shutdownTimeout)) return false
+        if (!terminateVerified(lobbyIdentity, request.shutdownTimeout)) return false
+        for ((registration, identity) in managedIdentities) {
+            if (!terminateVerified(identity, request.shutdownTimeout)) return false
+            if (!runCatching { registry.unregister(registration.name, owner) }.getOrDefault(false)) return false
+        }
         Files.deleteIfExists(layout.proxyReady)
         Files.deleteIfExists(layout.proxyPid)
         Files.deleteIfExists(layout.proxyOwner)
@@ -88,20 +133,27 @@ class StopService(
 
     private fun terminateVerified(identity: ProcessIdentity, timeout: Duration): Boolean {
         if (!identityReader.matches(identity)) return false
-        val handle = ProcessHandle.of(identity.pid).orElse(null) ?: return true
-        if (!handle.isAlive) return true
-        if (!handle.destroy()) return false
-        val deadline = System.nanoTime() + timeout.toNanos().coerceAtLeast(0)
+        val handle = try { ProcessHandle.of(identity.pid).orElse(null) } catch (_: Exception) { return false }
+            ?: return false
+        if (!handle.isAlive) return false
+        if (!runCatching { handle.destroy() }.getOrDefault(false)) return false
+        val deadline = deadline(timeout)
         while (handle.isAlive && System.nanoTime() < deadline) {
-            try { Thread.sleep(25) } catch (_: InterruptedException) {
+            try {
+                Thread.sleep(25)
+            } catch (_: InterruptedException) {
                 Thread.currentThread().interrupt()
                 return false
             }
         }
         if (!handle.isAlive) return true
-        if (!identityReader.matches(identity) || !handle.destroyForcibly()) return false
-        while (handle.isAlive && System.nanoTime() < deadline + Duration.ofSeconds(2).toNanos()) {
-            try { Thread.sleep(25) } catch (_: InterruptedException) {
+        if (!identityReader.matches(identity)) return false
+        if (!runCatching { handle.destroyForcibly() }.getOrDefault(false)) return false
+        val forceDeadline = deadline(Duration.ofSeconds(2))
+        while (handle.isAlive && System.nanoTime() < forceDeadline) {
+            try {
+                Thread.sleep(25)
+            } catch (_: InterruptedException) {
                 Thread.currentThread().interrupt()
                 return false
             }
@@ -109,16 +161,29 @@ class StopService(
         return !handle.isAlive
     }
 
-    private fun readIdentity(content: String, prefix: String): ProcessIdentity? {
-        val pid = readKey(content, "${prefix}-pid")?.toLongOrNull() ?: return null
-        val start = readKey(content, "${prefix}-start")?.let { runCatching { java.time.Instant.parse(it) }.getOrNull() }
-        val executable = readKey(content, "${prefix}-executable")?.let(Path::of)
-        val cwd = readKey(content, "${prefix}-working-directory")?.let(Path::of)
-        return ProcessIdentity(pid, start, executable, cwd)
+    private fun readRequiredIdentity(content: String, prefix: String): ProcessIdentity? {
+        val fields = listOf("pid", "start", "executable", "working-directory")
+        val present = fields.map { it to readKey(content, "$prefix-$it") }.toMap()
+        if (present.values.all { it == null } || present.values.any { it == null }) return null
+        val pid = present.getValue("pid")!!.toLongOrNull() ?: return null
+        val start = runCatching { Instant.parse(present.getValue("start")!!) }.getOrNull() ?: return null
+        val executable = runCatching { Path.of(present.getValue("executable")!!).toAbsolutePath().normalize() }.getOrNull() ?: return null
+        val cwd = runCatching { Path.of(present.getValue("working-directory")!!).toAbsolutePath().normalize() }.getOrNull() ?: return null
+        return runCatching { ProcessIdentity(pid, start, executable, cwd) }.getOrNull()
     }
 
     private fun readKey(content: String, key: String): String? = content.lineSequence()
-        .firstOrNull { it.startsWith("$key=") }
-        ?.substringAfter('=')
+        .map { it.removeSuffix("\r") }
+        .filter { it.startsWith("$key=") }
+        .map { it.substringAfter('=') }
+        .lastOrNull()
         ?.takeIf { it.isNotBlank() }
+
+    private fun deadline(timeout: Duration): Long {
+        val nanos = runCatching { timeout.toNanos() }.getOrDefault(Long.MAX_VALUE).coerceAtLeast(0)
+        val now = System.nanoTime()
+        return if (nanos > Long.MAX_VALUE - now) Long.MAX_VALUE else now + nanos
+    }
+
+    private enum class LeaseState { ABSENT, LIVE, DEAD, UNKNOWN }
 }

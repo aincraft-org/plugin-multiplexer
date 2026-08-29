@@ -28,32 +28,66 @@ class StatusService(
     private val output: PrintStream = System.out,
 ) {
     fun execute(request: NetworkStatusRequest = NetworkStatusRequest()): Int {
-        return try {
-            require(request.host.isNotBlank()) { "Status host must not be blank" }
-            require(request.timeout.toMillis() > 0) { "Status timeout must be positive" }
-            val proxyPort = request.proxyPort ?: readProxyPort() ?: 25565
-            val endpoints = buildList {
-                add("proxy" to proxyPort)
-                add("lobby" to request.lobbyPort)
-                registry.readNames().mapNotNull { name -> registry.readRegistration(name)?.let { add(name.value to it.port) } }
-            }
-            var failed = false
-            endpoints.forEach { (name, port) ->
-                val status = probe.probe(request.host, port, request.timeout)
-                output.println(format(name, request.host, port, status))
-                if (!status.reachable) failed = true
-            }
-            if (failed) 1 else 0
-        } catch (error: Exception) {
-            output.println("network status: ${error.message ?: error::class.simpleName}")
-            1
+        if (request.host.isBlank() || '\n' in request.host || '\r' in request.host) {
+            output.println("network status: host must be a non-blank single line")
+            return 1
         }
+        if (request.timeout.isNegative || request.timeout.isZero) {
+            output.println("network status: timeout must be positive")
+            return 1
+        }
+        val proxyPort = try {
+            request.proxyPort ?: readProxyPort() ?: 25565
+        } catch (error: Exception) {
+            output.println("network status: ${error.message ?: "invalid proxy configuration"}")
+            return 1
+        }
+        if (proxyPort !in 1..65535) {
+            output.println("network status: invalid proxy port $proxyPort")
+            return 1
+        }
+        if (request.lobbyPort !in 1..65535) {
+            output.println("network status: invalid lobby port ${request.lobbyPort}")
+            return 1
+        }
+
+        val registrations = try {
+            registry.readRegistrations()
+        } catch (error: Exception) {
+            output.println("network status: ${error.message ?: "invalid backend registry"}")
+            return 1
+        }
+        val endpointPorts = listOf(proxyPort, request.lobbyPort) + registrations.map { it.port }
+        if (endpointPorts.any { it !in 1..65535 } || endpointPorts.toSet().size != endpointPorts.size) {
+            output.println("network status: endpoint port collision or invalid port")
+            return 1
+        }
+
+        val endpoints = buildList {
+            add("proxy" to proxyPort)
+            add("lobby" to request.lobbyPort)
+            registrations.forEach { add(it.name.value to it.port) }
+        }
+        var failed = false
+        endpoints.forEach { (name, port) ->
+            val status = try {
+                probe.probe(request.host, port, request.timeout)
+            } catch (error: Exception) {
+                ServerStatus(reachable = false, error = error.message ?: error::class.simpleName)
+            }
+            output.println(format(name, request.host, port, status))
+            if (!status.reachable) failed = true
+        }
+        return if (failed) 1 else 0
     }
 
     private fun readProxyPort(): Int? {
         val content = AtomicFiles.readIfExists(layout.velocityConfig) ?: return null
-        val match = Regex("^bind\\s*=\\s*\\\"[^:]+:(\\d+)\\\"", RegexOption.MULTILINE).find(content) ?: return null
-        return match.groupValues[1].toIntOrNull()
+        val value = Regex("^bind\\s*=\\s*\\\"([^\"]+)\\\"", RegexOption.MULTILINE)
+            .find(content)?.groupValues?.get(1)
+            ?: throw IllegalArgumentException("velocity.toml has no bind endpoint")
+        val rawPort = value.substringAfterLast(':', missingDelimiterValue = "")
+        return rawPort.toIntOrNull() ?: throw IllegalArgumentException("velocity.toml has invalid bind endpoint")
     }
 
     private fun format(name: String, host: String, port: Int, status: ServerStatus): String = if (status.reachable) {
