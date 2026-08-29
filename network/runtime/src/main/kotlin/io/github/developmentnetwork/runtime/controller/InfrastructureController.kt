@@ -302,7 +302,7 @@ class InfrastructureController(
             }
 
             val proxyCommand = request.proxyCommand.ifEmpty {
-                defaultJavaCommand(velocityJar, "-config", layout.velocityConfig.toString())
+                defaultVelocityCommand(velocityJar, layout.velocityConfig)
             }
             val lobbyCommand = request.lobbyCommand.ifEmpty {
                 defaultJavaCommand(paperJar, "--nogui")
@@ -654,8 +654,6 @@ class InfrastructureController(
         return port
     }
 
-    private fun defaultJavaCommand(jar: Path, vararg args: String): List<String> =
-        listOf(Path.of(System.getProperty("java.home"), "bin", "java").toString(), "-jar", jar.toString(), *args)
 
     private fun validate(request: InfrastructureRequest) {
         require(request.owner.isNotBlank() && '\n' !in request.owner && '\r' !in request.owner) {
@@ -706,6 +704,12 @@ class InfrastructureController(
     }
 }
 
+
+internal fun defaultJavaCommand(jar: Path, vararg args: String): List<String> =
+    listOf(Path.of(System.getProperty("java.home"), "bin", "java").toString(), "-jar", jar.toString(), *args)
+
+internal fun defaultVelocityCommand(velocityJar: Path, velocityConfig: Path): List<String> =
+    defaultJavaCommand(velocityJar, "--config", velocityConfig.toString())
 
 fun interface EndpointReadiness {
     fun await(host: String, port: Int, timeout: Duration)
