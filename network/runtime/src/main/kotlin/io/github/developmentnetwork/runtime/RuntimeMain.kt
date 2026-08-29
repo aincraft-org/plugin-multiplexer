@@ -274,7 +274,7 @@ fun main(arguments: Array<String>) { exitProcess(runRuntime(arguments.toList()))
 
 private val PROXY_KEYS = setOf(
     "base", "target-server", "host", "proxy-port", "lobby-port", "online-mode", "owner",
-    "registration-owner", "timeout", "shutdown-timeout", "lobby-map-url", "lobby-map-sha256",
+    "registration-owner", "timeout", "shutdown-timeout", "control-timeout", "lobby-map-url", "lobby-map-sha256",
     "lobby-map-random-url", "dev-users",
 )
 private val FULL_KEYS = PROXY_KEYS + setOf("name", "backend", "network-backend", "backend-port", "port", "backend-dir", "plugin-jar")
