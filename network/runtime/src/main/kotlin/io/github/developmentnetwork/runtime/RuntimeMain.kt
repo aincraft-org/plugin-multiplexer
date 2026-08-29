@@ -173,7 +173,7 @@ fun parseRuntimeCommand(request: RuntimeRequest): RuntimeCommand {
                     port = requiredPort(settings, "port"),
                     owner = registrationOwner,
                     serverDir = Path.of(required(settings, "server-dir")),
-                    host = settings["host"] ?: "localhost",
+                    host = settings["host"]?.let { required(settings, "host") } ?: "localhost",
                     targetServer = target,
                     readinessTimeout = readinessTimeout,
                     controlTimeout = controlTimeout,

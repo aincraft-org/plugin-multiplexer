@@ -1,6 +1,7 @@
 package io.github.developmentnetwork.runtime
 
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import org.junit.jupiter.api.Test
@@ -49,5 +50,26 @@ class RuntimeMainTask6Test {
         val request = (command as RuntimeCommand.RegisterExternal).request
         assertEquals("proxy.example", request.targetServer)
         assertEquals("backend.example", request.host)
+    }
+    @Test
+    fun `external registration rejects blank backend host when target server is explicit`() {
+        val error = assertFailsWith<IllegalArgumentException> {
+            parseRuntimeCommand(
+                listOf(
+                    "registerBackend",
+                    "--base=/tmp/network",
+                    "--name=backend",
+                    "--port=25566",
+                    "--registration-owner=gradle-owner",
+                    "--server-dir=/tmp/network/backend",
+                    "--target-server=proxy.example",
+                    "--host=",
+                    "--timeout=240",
+                    "--lobby-port=30066",
+                    "--control-timeout=5",
+                ),
+            )
+        }
+        assertTrue(error.message.orEmpty().contains("host"))
     }
 }
