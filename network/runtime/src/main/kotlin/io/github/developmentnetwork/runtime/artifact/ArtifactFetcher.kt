@@ -142,7 +142,7 @@ class ArtifactFetcher(private val http: HttpClient) {
         }
     }
 
-    private fun ByteArray.toHex(): String = joinToString("") { "%02x".format(it.toInt() and 0xff) }
+    private fun ByteArray.toHex(): String = joinToString("") { "%02x".format(it) }
 
     private companion object {
         val LOWERCASE_SHA256 = Regex("[0-9a-f]{64}")
