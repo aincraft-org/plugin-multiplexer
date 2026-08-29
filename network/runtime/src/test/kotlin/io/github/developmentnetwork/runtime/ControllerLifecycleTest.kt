@@ -11,6 +11,7 @@ import io.github.developmentnetwork.runtime.controller.ControlCommand
 import io.github.developmentnetwork.runtime.controller.ControlServer
 import io.github.developmentnetwork.runtime.controller.ControlResponse
 import io.github.developmentnetwork.runtime.controller.defaultVelocityCommand
+import io.github.developmentnetwork.runtime.controller.proxyWorkingDirectory
 import io.github.developmentnetwork.runtime.model.OwnershipMode
 import io.github.developmentnetwork.runtime.process.ProcessSupervisor
 import io.github.developmentnetwork.runtime.state.RuntimeLayout
@@ -34,20 +35,20 @@ import kotlin.test.assertTrue
 class ControllerLifecycleTest {
 
     @Test
-    fun defaultVelocityCommandUsesLongConfigOption() {
+    fun defaultVelocityCommandUsesVelocityWorkingDirectoryContract() {
         val jar = Path.of("/tmp/velocity.jar")
-        val config = Path.of("/tmp/velocity.toml")
+        val layout = RuntimeLayout(Path.of("/tmp/runtime-base"))
 
         assertEquals(
             listOf(
                 Path.of(System.getProperty("java.home"), "bin", "java").toString(),
                 "-jar",
                 jar.toString(),
-                "--config",
-                config.toString(),
             ),
-            defaultVelocityCommand(jar, config),
+            defaultVelocityCommand(jar),
         )
+        assertEquals(layout.runtimeDir, proxyWorkingDirectory(layout, emptyList()))
+        assertEquals(layout.base, proxyWorkingDirectory(layout, listOf("explicit-proxy")))
     }
 
     @Test

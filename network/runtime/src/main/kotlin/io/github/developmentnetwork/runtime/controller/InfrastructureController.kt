@@ -302,7 +302,7 @@ class InfrastructureController(
             }
 
             val proxyCommand = request.proxyCommand.ifEmpty {
-                defaultVelocityCommand(velocityJar, layout.velocityConfig)
+                defaultVelocityCommand(velocityJar)
             }
             val lobbyCommand = request.lobbyCommand.ifEmpty {
                 defaultJavaCommand(paperJar, "--nogui")
@@ -338,7 +338,7 @@ class InfrastructureController(
 
             proxyProcess = processSupervisor.launch(
                 proxyCommand,
-                layout.base,
+                proxyWorkingDirectory(layout, request.proxyCommand),
                 environment = mapOf("DEV_USERS" to request.devUsers.joinToString(" ")),
             )
             persistProxyProcess(proxyProcess!!.identity)
@@ -708,8 +708,11 @@ class InfrastructureController(
 internal fun defaultJavaCommand(jar: Path, vararg args: String): List<String> =
     listOf(Path.of(System.getProperty("java.home"), "bin", "java").toString(), "-jar", jar.toString(), *args)
 
-internal fun defaultVelocityCommand(velocityJar: Path, velocityConfig: Path): List<String> =
-    defaultJavaCommand(velocityJar, "--config", velocityConfig.toString())
+internal fun defaultVelocityCommand(velocityJar: Path): List<String> =
+    defaultJavaCommand(velocityJar)
+
+internal fun proxyWorkingDirectory(layout: RuntimeLayout, proxyCommand: List<String>): Path =
+    if (proxyCommand.isEmpty()) layout.runtimeDir else layout.base
 
 fun interface EndpointReadiness {
     fun await(host: String, port: Int, timeout: Duration)
