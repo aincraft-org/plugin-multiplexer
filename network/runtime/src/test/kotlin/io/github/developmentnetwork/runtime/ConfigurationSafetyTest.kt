@@ -72,6 +72,29 @@ class ConfigurationSafetyTest {
         assertFalse(result.success)
         assertContains(result.message, "online-mode=false")
     }
+    @Test
+    fun paperPreflightAcceptsSequenceEntriesWhileCheckingForwardingPaths() {
+        val work = Files.createTempDirectory("preflight-paper-sequence")
+        Files.writeString(work.resolve("server.properties"), "online-mode=false\n")
+        Files.createDirectories(work.resolve("config"))
+        Files.writeString(
+            work.resolve("config/paper-global.yml"),
+            """
+            dont-obfuscate:
+              - minecraft:lodestone_tracker
+            proxies:
+              velocity:
+                enabled: true
+                online-mode: false
+                secret: "dev-local-forwarding-secret-change-me"
+            """.trimIndent() + "\n",
+        )
+        Files.writeString(work.resolve("spigot.yml"), "settings:\n  bungeecord: false\n")
+
+        val result = OfflinePreflight().verifyPaper(work)
+
+        assertTrue(result.success, result.message)
+    }
 
     @Test
     fun paperWriterUsesOfflineModernForwardingAndDisablesBungee() {
