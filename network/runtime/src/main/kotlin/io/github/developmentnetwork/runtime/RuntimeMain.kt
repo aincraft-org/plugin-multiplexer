@@ -84,7 +84,13 @@ fun parseRuntimeCommand(request: RuntimeRequest): RuntimeCommand {
     val settings = request.settings
     settings.keys.forEach { require(settingName.matches(it)) { "Invalid runtime setting name: $it" } }
     val base = Path.of(required(settings, "base"))
-    val target = oneSetting(settings, "target-server", "host") ?: "localhost"
+    val target = if (command == "registerBackend" || command == "register-external") {
+        settings["target-server"]?.let { required(settings, "target-server") }
+            ?: oneSetting(settings, "host")
+            ?: "localhost"
+    } else {
+        oneSetting(settings, "target-server", "host") ?: "localhost"
+    }
     val proxyPort = port(settings, "proxy-port", default = 25565, allowZero = true)
     val lobbyPort = port(settings, "lobby-port", default = 30066)
     val readinessTimeout = durationSeconds(settings, "timeout", 240)

@@ -28,4 +28,26 @@ class RuntimeMainTask6Test {
         assertEquals(30100, command.request.lobbyPort)
         assertEquals(listOf("alice", "bob"), command.request.devUsers)
     }
+    @Test
+    fun `external registration accepts distinct proxy target and backend host`() {
+        val command = parseRuntimeCommand(
+            listOf(
+                "registerBackend",
+                "--base=/tmp/network",
+                "--name=backend",
+                "--port=25566",
+                "--registration-owner=gradle-owner",
+                "--server-dir=/tmp/network/backend",
+                "--target-server=proxy.example",
+                "--host=backend.example",
+                "--timeout=240",
+                "--lobby-port=30066",
+                "--control-timeout=5",
+            ),
+        )
+        assertTrue(command is RuntimeCommand.RegisterExternal)
+        val request = (command as RuntimeCommand.RegisterExternal).request
+        assertEquals("proxy.example", request.targetServer)
+        assertEquals("backend.example", request.host)
+    }
 }
