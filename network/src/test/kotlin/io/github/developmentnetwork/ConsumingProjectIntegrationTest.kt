@@ -44,7 +44,7 @@ class ConsumingProjectIntegrationTest {
         )
         assertContains(configured.output, "custom/network")
         assertContains(configured.output, "25580")
-        assertContains(configured.output, "30100")
+        assertContains(configured.output, "networkLobbyPort=30100")
     }
 
     @Test
