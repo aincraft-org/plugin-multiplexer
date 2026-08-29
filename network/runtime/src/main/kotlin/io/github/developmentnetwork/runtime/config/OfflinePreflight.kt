@@ -174,13 +174,25 @@ class OfflinePreflight {
     private fun parseYaml(content: String): YamlDocument {
         val values = LinkedHashMap<List<String>, String?>()
         val stack = ArrayList<YamlNode>()
+        var scalarContinuationIndent: Int? = null
         content.lineSequence().forEachIndexed { index, rawLine ->
             if (rawLine.contains('\t')) throw IllegalArgumentException("line ${index + 1} contains a tab")
             val trimmed = rawLine.trim()
             if (trimmed.isEmpty() || trimmed.startsWith('#')) return@forEachIndexed
-            if (trimmed == "-" || trimmed.startsWith("- ")) return@forEachIndexed
+            if (trimmed == "-" || trimmed.startsWith("- ")) {
+                scalarContinuationIndent = null
+                return@forEachIndexed
+            }
             val indent = rawLine.indexOfFirst { !it.isWhitespace() }
             val separator = trimmed.indexOf(':')
+            if (separator < 0) {
+                val previousScalarIndent = scalarContinuationIndent
+                require(previousScalarIndent != null && indent > previousScalarIndent) {
+                    "line ${index + 1} must use key: value"
+                }
+                scalarContinuationIndent = null
+                return@forEachIndexed
+            }
             require(separator > 0) { "line ${index + 1} must use key: value" }
             val key = trimmed.substring(0, separator).trim()
             require(YAML_KEY.matches(key)) { "line ${index + 1} has invalid YAML key" }
@@ -189,6 +201,7 @@ class OfflinePreflight {
             require(!values.containsKey(path)) { "duplicate YAML property '${path.joinToString(".")}'" }
             val rawValue = trimmed.substring(separator + 1).trim()
             values[path] = rawValue.takeUnless { it.isEmpty() }?.let(::yamlScalar)
+            scalarContinuationIndent = indent.takeUnless { rawValue.isEmpty() }
             if (rawValue.isEmpty()) stack += YamlNode(indent, key)
         }
         return YamlDocument(values)

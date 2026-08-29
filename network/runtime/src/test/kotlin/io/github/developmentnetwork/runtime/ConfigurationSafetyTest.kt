@@ -96,6 +96,30 @@ class ConfigurationSafetyTest {
         assertTrue(result.success, result.message)
     }
     @Test
+    fun paperPreflightAcceptsMultilinePlainScalarContinuation() {
+        val work = Files.createTempDirectory("preflight-paper-multiline")
+        Files.writeString(work.resolve("server.properties"), "online-mode=false\n")
+        Files.createDirectories(work.resolve("config"))
+        Files.writeString(
+            work.resolve("config/paper-global.yml"),
+            """
+            no-permission: <red>You do not have permission to use this command.
+              Please contact an administrator if you believe this is a mistake.
+            proxies:
+              velocity:
+                enabled: true
+                online-mode: false
+                secret: "dev-local-forwarding-secret-change-me"
+            """.trimIndent() + "\n",
+        )
+        Files.writeString(work.resolve("spigot.yml"), "settings:\n  bungeecord: false\n")
+
+        val result = OfflinePreflight().verifyPaper(work)
+
+        assertTrue(result.success, result.message)
+    }
+
+    @Test
     fun paperPreflightRejectsMalformedNonSequenceYamlLine() {
         val work = Files.createTempDirectory("preflight-malformed-yaml")
         Files.writeString(work.resolve("server.properties"), "online-mode=false\n")
