@@ -65,9 +65,25 @@ class ConsumingProjectIntegrationTest {
     @Test
     fun `composite consumer executes a runtime-backed short task`() {
         val consumer = project("")
-        val failure = assertFails { run(consumer, "networkStatus", "-PnetworkTimeout=1") } as UnexpectedBuildFailure
-        assertContains(failure.buildResult.output, "network runtime exited with code 1")
-        assertTrue("ClassNotFoundException" !in failure.buildResult.output)
+        val proxy = java.net.ServerSocket(0, 1, java.net.InetAddress.getLoopbackAddress())
+        val lobby = java.net.ServerSocket(0, 1, java.net.InetAddress.getLoopbackAddress())
+        try {
+            val failure = assertFails {
+                run(
+                    consumer,
+                    "networkStatus",
+                    "-PnetworkTargetServer=127.0.0.1",
+                    "-PnetworkProxyPort=${proxy.localPort}",
+                    "-PnetworkLobbyPort=${lobby.localPort}",
+                    "-PnetworkTimeout=1",
+                )
+            } as UnexpectedBuildFailure
+            assertContains(failure.buildResult.output, "network runtime exited with code 1")
+            assertTrue("ClassNotFoundException" !in failure.buildResult.output)
+        } finally {
+            proxy.close()
+            lobby.close()
+        }
     }
 
     private fun project(buildScript: String) = Files.createTempDirectory("network-consuming-project").also { dir ->
