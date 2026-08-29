@@ -157,19 +157,19 @@ class RegistrationService(
     }
 
     private fun readInt(content: String, key: String): Int? =
-        Regex("^$key[ \\t]*=[ \\t]*\\\"[^:\\r\\n]+:(\\d+)\\\"[ \\t]*$", RegexOption.MULTILINE)
+        Regex("^$key[ \\t]*=[ \\t]*\\\"[^:\\r\\n]+:(\\d+)\\\"[ \\t]*\\r?$", RegexOption.MULTILINE)
             .find(content)?.groupValues?.get(1)?.toIntOrNull()
 
     private fun readBoolean(content: String, key: String): Boolean? =
-        Regex("^$key[ \\t]*=[ \\t]*(true|false)[ \\t]*$", RegexOption.MULTILINE)
+        Regex("^$key[ \\t]*=[ \\t]*(true|false)[ \\t]*\\r?$", RegexOption.MULTILINE)
             .find(content)?.groupValues?.get(1)?.toBooleanStrictOrNull()
 
     private fun readLobbyTarget(content: String): String? =
-        Regex("^lobby[ \\t]*=[ \\t]*\\\"([^:\\r\\n]+):(\\d+)\\\"[ \\t]*$", RegexOption.MULTILINE)
+        Regex("^lobby[ \\t]*=[ \\t]*\\\"([^:\\r\\n]+):(\\d+)\\\"[ \\t]*\\r?$", RegexOption.MULTILINE)
             .find(content)?.groupValues?.get(1)
 
     private fun readLobbyPort(content: String): Int? =
-        Regex("^lobby[ \\t]*=[ \\t]*\\\"[^:\\r\\n]+:(\\d+)\\\"[ \\t]*$", RegexOption.MULTILINE)
+        Regex("^lobby[ \\t]*=[ \\t]*\\\"[^:\\r\\n]+:(\\d+)\\\"[ \\t]*\\r?$", RegexOption.MULTILINE)
             .find(content)?.groupValues?.get(1)?.toIntOrNull()
     private fun fail(error: Exception): Int {
         System.err.println("external registration: ${error.message ?: error::class.simpleName}")

@@ -224,6 +224,55 @@ class RegistrationOwnershipTest {
     }
 
     @Test
+    fun externalRegistrationAcceptsCanonicalCrLfVelocityConfig() {
+        val base = Files.createTempDirectory("runtime-registration-crlf-config")
+        val layout = RuntimeLayout(base)
+        val serverDir = base.resolve("external")
+        val proxyReservation = ServerSocket(0)
+        val lobbyReservation = ServerSocket(0)
+        val backendReservation = ServerSocket(0)
+        val proxyPort = proxyReservation.localPort
+        val lobbyPort = lobbyReservation.localPort
+        val backendPort = backendReservation.localPort
+        writePaperConfig(serverDir, backendPort)
+        val paperMarker = serverDir.resolve("sentinel.txt").also { Files.writeString(it, "untouched") }
+        io.github.developmentnetwork.runtime.config.VelocityConfigWriter().write(
+            layout,
+            io.github.developmentnetwork.runtime.config.VelocityConfig(
+                proxyPort = proxyPort,
+                targetServer = "localhost",
+                onlineMode = false,
+                lobbyPort = lobbyPort,
+            ),
+        )
+        val canonical = Files.readString(layout.velocityConfig)
+        Files.writeString(layout.velocityConfig, canonical.replace("\n", "\r\n"))
+        val token = ControlServer.generateToken()
+        val control = ControlServer().serve(layout.proxyControl, token) {
+            io.github.developmentnetwork.runtime.controller.ControlResponse.success("reloaded")
+        }
+        AtomicFiles.write(layout.proxyReady, "ready\n")
+        try {
+            val request = io.github.developmentnetwork.runtime.service.RegisterExternalRequest(
+                name = "external",
+                port = backendPort,
+                owner = "external-owner",
+                serverDir = serverDir,
+                readinessTimeout = Duration.ofSeconds(1),
+            )
+
+            assertEquals(0, RegistrationService(layout).execute(request))
+            assertTrue(Files.exists(layout.backend("external").owner))
+            assertEquals("untouched", Files.readString(paperMarker))
+        } finally {
+            control.close()
+            proxyReservation.close()
+            lobbyReservation.close()
+            backendReservation.close()
+        }
+    }
+
+    @Test
     fun reloadIsIdempotentAndStopFallbackDoesNotTouchExternalRegistration() {
         val base = Files.createTempDirectory("runtime-services")
         val layout = RuntimeLayout(base)
