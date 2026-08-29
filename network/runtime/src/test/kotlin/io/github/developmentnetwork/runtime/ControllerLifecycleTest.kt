@@ -259,6 +259,69 @@ class ControllerLifecycleTest {
     }
 
     @Test
+    fun managedCleanupReportsReloadFailureAndLeavesExternalRegistrationUntouched() {
+        val base = Files.createTempDirectory("runtime-managed-reload-failure")
+        val layout = RuntimeLayout(base)
+        val ports = freePorts(3)
+        val external = BackendRegistration(
+            BackendName("external"),
+            freePort(),
+            "external-owner",
+            OwnershipMode.EXTERNAL,
+            null,
+        )
+        val reloads = AtomicInteger()
+        val rejectReload = java.util.concurrent.atomic.AtomicBoolean(false)
+        Files.createDirectories(layout.runtimeDir)
+        AtomicFiles.write(layout.proxyReady, "ready\n")
+        AtomicFiles.write(layout.proxyOwner, "owner=proxy-owner\nmode=infrastructure\n")
+        val control = ControlServer().serve(layout.proxyControl, ControlServer.generateToken()) { command ->
+            when (command) {
+                ControlCommand.Reload -> {
+                    reloads.incrementAndGet()
+                    if (rejectReload.get()) ControlResponse.failure("reload unavailable")
+                    else ControlResponse.success("reloaded")
+                }
+                ControlCommand.Shutdown -> ControlResponse.success("stopped")
+            }
+        }
+        val request = ManagedBackendRequest(
+            name = "reload-failure",
+            owner = "reload-failure-owner",
+            port = ports[2],
+            workDir = base.resolve("managed"),
+            paperCommand = FakeJavaServer.command(FakeJavaServer.classPath(), ports[2], "paper"),
+            artifacts = FakeArtifacts,
+            readinessTimeout = Duration.ofSeconds(5),
+            proxyPort = ports[0],
+            lobbyPort = ports[1],
+            proxyOwner = "proxy-owner",
+        )
+        val controller = ManagedBackendController(layout)
+        val result = AtomicInteger(-1)
+        val running = thread(start = true) { result.set(controller.run(request)) }
+        try {
+            await(layout.backend("reload-failure").ready)
+            val reloadDeadline = System.nanoTime() + 10_000_000_000L
+            while (reloads.get() < 1 && System.nanoTime() < reloadDeadline) Thread.sleep(10)
+            assertTrue(reloads.get() >= 1)
+            RegistryStore(layout).register(external)
+            rejectReload.set(true)
+            controller.stop(request)
+            running.join(10_000)
+        } finally {
+            control.close()
+            if (running.isAlive) controller.stop(request)
+            running.join(10_000)
+        }
+
+        assertFalse(running.isAlive)
+        assertEquals(1, result.get(), "cleanup reload failure must fail the controller")
+        assertTrue(reloads.get() >= 2)
+        assertEquals(external, RegistryStore(layout).readRegistration(external.name))
+    }
+
+    @Test
     fun managedBackendFailsClosedForUnrecognizedSharedProxy() {
         val base = Files.createTempDirectory("runtime-managed-foreign-proxy")
         val layout = RuntimeLayout(base)

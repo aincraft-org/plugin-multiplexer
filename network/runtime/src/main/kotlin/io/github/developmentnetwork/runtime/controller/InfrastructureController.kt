@@ -808,7 +808,8 @@ class ManagedBackendController(
         if (existing == null) reservation = ManagedReservation(name, port = port, owner = request.owner)
         val shutdownHook = Thread { stop(request) }
         Runtime.getRuntime().addShutdownHook(shutdownHook)
-        return try {
+        var result = 1
+        try {
             Files.createDirectories(request.workDir)
             Files.createDirectories(layout.runtimeDir)
             request.pluginJar?.let { deployPluginJar(it, request.workDir) }
@@ -833,14 +834,17 @@ class ManagedBackendController(
             AtomicFiles.write(state.ready, "ready\n")
             check(refreshProxy(request)) { "managed backend registration could not reload the active proxy" }
             while (process.process.isAlive && !stopRequested.get()) awaitWake(50)
-            0
+            result = 0
         } catch (_: InterruptedException) {
-            if (stopRequested.get()) 0 else 1
+            result = if (stopRequested.get()) 0 else {
+                System.err.println("managed backend ${request.name}: interrupted")
+                1
+            }
         } catch (error: Exception) {
             System.err.println("managed backend ${request.name}: ${error.message ?: error::class.simpleName}")
-            1
+            result = 1
         } finally {
-            cleanup(request)
+            if (!cleanup(request)) result = 1
             startingMarkers.forEach(Files::deleteIfExists)
             try {
                 Runtime.getRuntime().removeShutdownHook(shutdownHook)
@@ -853,6 +857,7 @@ class ManagedBackendController(
             reservation = null
             stopRequested.set(false)
         }
+        return result
     }
 
     fun stop(request: ManagedBackendRequest = activeRequest ?: error("No managed backend is running")): Int {
@@ -862,8 +867,8 @@ class ManagedBackendController(
         return 0
     }
 
-    private fun cleanup(request: ManagedBackendRequest) {
-        val name = runCatching { BackendName(request.name) }.getOrNull() ?: return
+    private fun cleanup(request: ManagedBackendRequest): Boolean {
+        val name = runCatching { BackendName(request.name) }.getOrNull() ?: return true
         val cleanupInterrupted = Thread.interrupted()
         try {
             val process = active
@@ -873,7 +878,7 @@ class ManagedBackendController(
             }
             val processExited = process?.let { !it.process.isAlive } == true
             if (result?.success == true || processExited) Files.deleteIfExists(layout.backend(name).ready)
-            val claim = reservation ?: return
+            val claim = reservation ?: return true
             // A stop interrupt is consumed above and must not interrupt the
             // registration lock; any unproven termination still preserves state.
             Thread.interrupted()
@@ -884,9 +889,23 @@ class ManagedBackendController(
             val removable = (process != null && current?.process == process.identity && processExited) ||
                 (process == null && current?.process == null)
             if (claimMatches && removable) {
-                val removed = runCatching { RegistryStore(layout).unregister(name, claim.owner) }.getOrDefault(false)
-                if (removed) runCatching { refreshProxy(request) }
+                val removedResult = runCatching { RegistryStore(layout).unregister(name, claim.owner) }
+                if (!removedResult.getOrDefault(false)) {
+                    val detail = removedResult.exceptionOrNull()?.message ?: "registration was not removed"
+                    System.err.println("managed backend ${request.name}: cleanup could not remove its registration: $detail")
+                    return false
+                }
+                if (!refreshProxy(request)) {
+                    System.err.println(
+                        "managed backend ${request.name}: cleanup removed its registration but could not reload the active proxy",
+                    )
+                    return false
+                }
             }
+            return true
+        } catch (error: Exception) {
+            System.err.println("managed backend ${request.name}: cleanup failed: ${error.message ?: error::class.simpleName}")
+            return false
         } finally {
             if (cleanupInterrupted) Thread.currentThread().interrupt()
         }

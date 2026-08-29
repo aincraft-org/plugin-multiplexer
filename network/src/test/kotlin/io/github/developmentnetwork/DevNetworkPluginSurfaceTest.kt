@@ -3,6 +3,7 @@ package io.github.developmentnetwork
 import java.nio.file.Files
 import kotlin.io.path.writeText
 import kotlin.test.assertEquals
+import kotlin.test.assertNotEquals
 import kotlin.test.assertTrue
 import org.gradle.testfixtures.ProjectBuilder
 import org.gradle.testkit.runner.GradleRunner
@@ -64,6 +65,24 @@ class DevNetworkPluginSurfaceTest {
 
         assertEquals(listOf("alice", "bob", "carol"), users(extension))
     }
+
+    @Test
+    fun `custom backend keeps stop owner aligned with infrastructure owner`() {
+        val project = ProjectBuilder.builder().withName("consumer").build()
+        project.pluginManager.apply(DevNetworkPlugin::class.java)
+        val extension = project.extensions.getByType(DevelopmentNetworkExtension::class.java)
+        extension.networkBackend.set("custom-backend")
+
+        val expectedInfrastructureOwner = infrastructureOwner(project)
+        assertEquals(expectedInfrastructureOwner, stopNetworkRequest(project).owner)
+        assertEquals(expectedInfrastructureOwner, owner(project, project.name))
+        assertNotEquals(expectedInfrastructureOwner, managedOwner(project, extension.networkBackend.get()))
+
+        extension.networkRegistrationOwner.set("explicit-owner")
+        assertEquals("explicit-owner", infrastructureOwner(project))
+        assertEquals("explicit-owner", managedOwner(project, extension.networkBackend.get()))
+    }
+
 
 
     private fun consumerProject() = Files.createTempDirectory("network-plugin-surface").also { dir ->

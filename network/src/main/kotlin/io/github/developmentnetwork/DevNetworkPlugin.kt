@@ -54,7 +54,7 @@ class DevNetworkPlugin : Plugin<Project> {
 
 @DisableCachingByDefault(because = "Network tasks start, stop, or mutate external services")
 abstract class RunProxyTask : org.gradle.api.DefaultTask() {
-    @TaskAction fun runProxy() { val e = extension(project); NetworkTaskSupport.run(project, RuntimeCommand.ServeProxy(infrastructure(owner(project, project.name), e)), true) }
+    @TaskAction fun runProxy() { val e = extension(project); NetworkTaskSupport.run(project, RuntimeCommand.ServeProxy(infrastructure(infrastructureOwner(project), e)), true) }
 }
 
 @DisableCachingByDefault(because = "Network tasks mutate shared network registration state")
@@ -108,7 +108,7 @@ abstract class RunBackendTask : org.gradle.api.DefaultTask() {
     @TaskAction fun runBackend() {
         val e = extension(project); val name = backendName(project); val jar = configuredJar(project); val workDir = baseDir(project).resolve("runtime/auto/$name")
         val requestedPort = e.networkBackendPort.orNull?.let { port(it, "networkBackendPort") }
-        NetworkTaskSupport.run(project, RuntimeCommand.ServeBackend(ManagedBackendRequest(name, managedOwner(project, name), requestedPort, workDir.toPath(), pluginJar = jar.toPath(), readinessTimeout = duration(e.networkTimeout.get(), "networkTimeout"), shutdownTimeout = duration(e.networkShutdownTimeout.get(), "networkShutdownTimeout"), devUsers = users(e), proxyPort = port(e.networkProxyPort.get(), "networkProxyPort", true), lobbyPort = port(e.networkLobbyPort.get(), "networkLobbyPort"), proxyOwner = owner(project, project.name))), true)
+        NetworkTaskSupport.run(project, RuntimeCommand.ServeBackend(ManagedBackendRequest(name, managedOwner(project, name), requestedPort, workDir.toPath(), pluginJar = jar.toPath(), readinessTimeout = duration(e.networkTimeout.get(), "networkTimeout"), shutdownTimeout = duration(e.networkShutdownTimeout.get(), "networkShutdownTimeout"), devUsers = users(e), proxyPort = port(e.networkProxyPort.get(), "networkProxyPort", true), lobbyPort = port(e.networkLobbyPort.get(), "networkLobbyPort"), proxyOwner = infrastructureOwner(project))), true)
     }
 }
 
@@ -118,26 +118,15 @@ abstract class RunNetworkTask : org.gradle.api.DefaultTask() {
     @TaskAction fun runNetwork() {
         val e = extension(project); val name = backendName(project); val jar = configuredJar(project); val workDir = baseDir(project).resolve("runtime/auto/$name")
         val requestedPort = e.networkBackendPort.orNull?.let { port(it, "networkBackendPort") }
-        val runOwner = managedOwner(project, name)
-        NetworkTaskSupport.run(project, RuntimeCommand.ServeFull(infrastructure(runOwner, e).copy(backendName = name, backendPort = requestedPort, backendOwner = runOwner, backendWorkDir = workDir.toPath(), backendPluginJar = jar.toPath())), true)
+        val backendOwner = managedOwner(project, name)
+        NetworkTaskSupport.run(project, RuntimeCommand.ServeFull(infrastructure(infrastructureOwner(project), e).copy(backendName = name, backendPort = requestedPort, backendOwner = backendOwner, backendWorkDir = workDir.toPath(), backendPluginJar = jar.toPath())), true)
     }
 }
 
 @DisableCachingByDefault(because = "Network tasks stop external services")
 abstract class StopNetworkTask : org.gradle.api.DefaultTask() {
     @TaskAction fun stopNetwork() {
-        val e = extension(project)
-        NetworkTaskSupport.run(
-            project,
-            RuntimeCommand.StopNetwork(
-                StopNetworkRequest(
-                    owner(project, project.name),
-                    duration(e.networkControlTimeout.get(), "networkControlTimeout"),
-                    duration(e.networkShutdownTimeout.get(), "networkShutdownTimeout"),
-                ),
-            ),
-            false,
-        )
+        NetworkTaskSupport.run(project, RuntimeCommand.StopNetwork(stopNetworkRequest(project)), false)
     }
 }
 
@@ -175,3 +164,14 @@ private fun infrastructure(owner: String, e: DevelopmentNetworkExtension) = Infr
     proxyPort = port(e.networkProxyPort.get(), "networkProxyPort", true), lobbyPort = port(e.networkLobbyPort.get(), "networkLobbyPort"), targetServer = e.networkTargetServer.get(), onlineMode = e.networkOnlineMode.get(), owner = owner,
     readinessTimeout = duration(e.networkTimeout.get(), "networkTimeout"), shutdownTimeout = duration(e.networkShutdownTimeout.get(), "networkShutdownTimeout"), devUsers = users(e),
 )
+
+internal fun infrastructureOwner(project: Project): String = owner(project, project.name)
+
+internal fun stopNetworkRequest(project: Project): StopNetworkRequest {
+    val e = extension(project)
+    return StopNetworkRequest(
+        owner = infrastructureOwner(project),
+        controlTimeout = duration(e.networkControlTimeout.get(), "networkControlTimeout"),
+        shutdownTimeout = duration(e.networkShutdownTimeout.get(), "networkShutdownTimeout"),
+    )
+}
