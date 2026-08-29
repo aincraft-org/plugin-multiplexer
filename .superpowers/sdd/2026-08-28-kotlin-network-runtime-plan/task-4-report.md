@@ -81,3 +81,30 @@ No formatter, linter, project-wide build, or project-wide test command was run.
 - Java NIO has no atomic no-follow Unix-domain connect primitive. The client verifies path components and file identity immediately before connecting and before each write, but an attacker able to replace the path in the final syscall-sized race window cannot be ruled out portably.
 - Java has no portable process cwd API. This implementation intentionally fails closed when `/proc/<pid>/cwd` cannot be observed for a cwd-bearing identity, including on non-Linux hosts.
 - A DNS resolver implementation may continue internally after its bounded daemon task is cancelled; it cannot extend the caller's deadline or block runtime shutdown.
+
+## Review Round 2
+
+Implemented all round-2 review fixes:
+
+- Process termination now revalidates the root's exact captured PID/start/executable/cwd lease before and between every descendant discovery and graceful/force signal. Root loss or identity mismatch stops discovery/signaling without touching replacement processes and returns `NOT_OWNED` (or a safe non-terminated result when a force request already killed the root).
+- Descendant capture failures are retained as indeterminate live handles instead of being skipped. Tree completion requires every tracked and unverified descendant to be observed dead; PID reuse with a live replacement is also indeterminate. A race-focused root-identity fixture and live-descendant force fixture cover these gates.
+- Identity metadata capture and matching now fail closed on unavailable metadata or canonicalization/path errors. Launch rejects incomplete identity leases and destroys/waits for a child when post-start capture fails. Tests cover synthetic launch capture failure, disappearing working directories, and unavailable executable/cwd metadata.
+- Unix stale-socket cleanup authorizes unlinking only for an explicit connection-refused result (recognized refusal text); all other `ConnectException` forms and I/O/security errors remain indeterminate. Existing socket type, symlink, file-key, and replacement-path checks remain in place.
+- Interrupt state is checked before force escalation and between discovery/signal steps. Graceful interruption restores the flag and returns `INTERRUPTED` without force-killing.
+- Request and response frame parsers count all received bytes and reject embedded carriage returns (only CR immediately before LF is accepted). Control clients use a bounded semaphore-backed worker policy so listener resources cannot grow without limit; saturation and parser regressions are covered.
+
+## Round-2 Regression Evidence
+
+Focused command:
+
+```text
+./gradlew -p network :runtime:test --tests '*ProcessSupervisorTest' --tests '*ControlChannelTest'
+```
+
+Result: `BUILD SUCCESSFUL`; 26 focused tests completed with zero failures or errors.
+
+No formatter, linter, full suite, or project-wide build was run.
+
+## Round-2 Findings Status and Residual Risks
+
+All seven round-1 findings are addressed with production changes and deterministic focused fixtures. The control probe's refusal-text check is intentionally conservative for Java 21 portability: platform-specific refusal messages authorize stale cleanup, while timeout, permission, interruption, resource, and unknown outcomes fail closed. As with round 1, Java NIO cannot provide an atomic no-follow Unix-domain connect; path and file-key checks narrow but cannot eliminate the final syscall race. Linux `/proc/<pid>/cwd` remains required for cwd-bearing leases because Java has no portable cwd API.

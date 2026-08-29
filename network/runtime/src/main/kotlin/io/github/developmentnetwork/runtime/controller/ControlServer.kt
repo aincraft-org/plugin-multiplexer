@@ -75,10 +75,15 @@ class ControlServer {
         val running = AtomicBoolean(true)
         val clients = java.util.concurrent.ConcurrentHashMap.newKeySet<SocketChannel>()
         val workers = java.util.concurrent.ConcurrentHashMap.newKeySet<Thread>()
+        val workerSlots = java.util.concurrent.Semaphore(MAX_CLIENT_WORKERS)
         val listener = Thread({
             while (running.get()) {
                 try {
                     val client = channel.accept()
+                    if (!workerSlots.tryAcquire()) {
+                        runCatching { client.close() }
+                        continue
+                    }
                     clients.add(client)
                     val worker = Thread({
                         try {
@@ -89,11 +94,20 @@ class ControlServer {
                         } finally {
                             clients.remove(client)
                             workers.remove(Thread.currentThread())
+                            workerSlots.release()
                             runCatching { client.close() }
                         }
                     }, "runtime-control-client-${address.fileName}").apply { isDaemon = true }
                     workers.add(worker)
-                    worker.start()
+                    try {
+                        worker.start()
+                    } catch (error: Throwable) {
+                        workers.remove(worker)
+                        clients.remove(client)
+                        workerSlots.release()
+                        runCatching { client.close() }
+                        throw error
+                    }
                 } catch (_: AsynchronousCloseException) {
                     break
                 } catch (_: IOException) {
@@ -145,6 +159,8 @@ class ControlServer {
     private fun readLine(client: SocketChannel, selector: Selector, deadline: Long): String? {
         val output = java.io.ByteArrayOutputStream()
         val one = ByteBuffer.allocate(1)
+        var frameBytes = 0
+        var carriageReturn = false
         while (true) {
             one.clear()
             val count = client.read(one)
@@ -153,12 +169,21 @@ class ControlServer {
                 awaitReady(selector, client, SelectionKey.OP_READ, deadline)
                 continue
             }
-            val value = one.array()[0].toInt() and 0xff
-            if (value == '\n'.code) return output.toString(StandardCharsets.UTF_8)
-            if (value == '\r'.code) continue
-            output.write(value)
-            if (output.size() > MAX_REQUEST_LINE_BYTES) {
+            frameBytes += count
+            if (frameBytes > MAX_REQUEST_LINE_BYTES) {
                 throw IOException("Control request frame is too large")
+            }
+            val value = one.array()[0].toInt() and 0xff
+            when {
+                value == '\r'.code -> {
+                    if (carriageReturn) throw IOException("Embedded carriage return in control frame")
+                    carriageReturn = true
+                }
+                value == '\n'.code -> {
+                    return output.toString(StandardCharsets.UTF_8)
+                }
+                carriageReturn -> throw IOException("Embedded carriage return in control frame")
+                else -> output.write(value)
             }
         }
     }
@@ -237,21 +262,43 @@ class ControlServer {
                         selector.selectedKeys().clear()
                         if (!ready) continue
                         return try {
-                            if (channel.finishConnect()) ProbeOutcome.LIVE else ProbeOutcome.INDETERMINATE
-                        } catch (_: java.net.ConnectException) {
-                            ProbeOutcome.STALE
+                            if (channel.finishConnect()) {
+                                ProbeOutcome.LIVE
+                            } else {
+                                ProbeOutcome.INDETERMINATE
+                            }
+                        } catch (error: java.net.ConnectException) {
+                            explicitRefusal(error)
                         }
                     }
                 }
             }
-        } catch (_: java.net.ConnectException) {
-            return ProbeOutcome.STALE
+        } catch (error: java.net.ConnectException) {
+            return explicitRefusal(error)
         } catch (_: IOException) {
             // Permission, resource, interruption, missing path, and all other errors
             // are indeterminate and therefore refuse cleanup.
             return ProbeOutcome.INDETERMINATE
         } catch (_: SecurityException) {
             return ProbeOutcome.INDETERMINATE
+        }
+    }
+
+    /**
+     * A ConnectException is not by itself portable evidence of ECONNREFUSED. Only
+     * the platform's explicit refusal text authorizes unlinking a stale node; all
+     * other forms fail closed.
+     */
+    private fun explicitRefusal(error: java.net.ConnectException): ProbeOutcome {
+        val message = error.message?.trim()?.lowercase() ?: return ProbeOutcome.INDETERMINATE
+        return if (
+            message == "connection refused" ||
+            message.endsWith(": connection refused") ||
+            message.contains("econnrefused")
+        ) {
+            ProbeOutcome.STALE
+        } else {
+            ProbeOutcome.INDETERMINATE
         }
     }
 
@@ -401,6 +448,7 @@ class ControlServer {
         private const val CLOSE_JOIN_MILLIS = 1_000L
         private const val REQUEST_TIMEOUT_SECONDS = 1L
         private const val PROBE_TIMEOUT_MILLIS = 250L
+        private const val MAX_CLIENT_WORKERS = 32
         private const val MAX_REQUEST_LINE_BYTES = 4 * 1024
         private const val MAX_RESPONSE_BYTES = 16 * 1024
         private const val MAX_STATE_BYTES = 4 * 1024

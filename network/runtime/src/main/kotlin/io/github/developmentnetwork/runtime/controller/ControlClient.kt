@@ -86,6 +86,8 @@ class ControlClient {
         val output = ByteArrayOutputStream()
         val buffer = ByteBuffer.allocate(512)
         var lines = 0
+        var frameBytes = 0
+        var carriageReturn = false
         while (lines < 2) {
             buffer.clear()
             val count = channel.read(buffer)
@@ -94,16 +96,28 @@ class ControlClient {
                 awaitReady(selector, channel, SelectionKey.OP_READ, deadline)
                 continue
             }
+            frameBytes += count
+            if (frameBytes > MAX_RESPONSE_BYTES) throw IOException("Control response is too large")
             buffer.flip()
             while (buffer.hasRemaining()) {
                 val value = buffer.get().toInt().and(0xff)
-                output.write(value)
-                if (value == '\n'.code) lines++
-                if (output.size() > MAX_RESPONSE_BYTES) throw IOException("Control response is too large")
+                when {
+                    value == '\r'.code -> {
+                        if (carriageReturn) throw IOException("Embedded carriage return in control response")
+                        carriageReturn = true
+                    }
+                    value == '\n'.code -> {
+                        output.write(value)
+                        lines++
+                        carriageReturn = false
+                    }
+                    carriageReturn -> throw IOException("Embedded carriage return in control response")
+                    else -> output.write(value)
+                }
                 if (lines >= 2) break
             }
         }
-        if (lines < 2) throw IOException("Incomplete control response")
+        if (lines < 2 || carriageReturn) throw IOException("Incomplete control response")
         return output.toByteArray()
     }
 

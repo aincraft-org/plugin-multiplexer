@@ -150,6 +150,46 @@ class ControlChannelTest {
     }
 
     @Test
+    fun embeddedCarriageReturnsAreRejectedWithoutStoppingListener() {
+        val runtime = Files.createTempDirectory("control-channel-cr")
+        val socket = runtime.resolve("proxy.control")
+        val token = ControlServer.generateToken()
+        val server = ControlServer().serve(socket, token) { ControlResponse(true, "ok") }
+        try {
+            rawConnect(socket).use { malformed ->
+                writeAll(malformed, "$token\rnot-a-command\n".toByteArray())
+            }
+            assertEquals("ok", ControlClient().request(
+                socket, token, ControlCommand.Reload, Duration.ofSeconds(2),
+            ).message)
+        } finally {
+            server.close()
+        }
+    }
+
+    @Test
+    fun clientWorkersHaveAReservableBoundAndListenerSurvivesSaturation() {
+        val runtime = Files.createTempDirectory("control-channel-workers")
+        val socket = runtime.resolve("proxy.control")
+        val token = ControlServer.generateToken()
+        val server = ControlServer().serve(socket, token) { ControlResponse(true, "ok") }
+        val held = mutableListOf<SocketChannel>()
+        try {
+            repeat(64) { held += rawConnect(socket) }
+            Thread.sleep(100)
+        } finally {
+            held.forEach { runCatching { it.close() } }
+        }
+        try {
+            assertEquals("ok", ControlClient().request(
+                socket, token, ControlCommand.Reload, Duration.ofSeconds(2),
+            ).message)
+        } finally {
+            server.close()
+        }
+    }
+
+    @Test
     fun staleCleanupRequiresARealRefusedUnixSocketAndPreservesTamperedPaths() {
         val runtime = Files.createTempDirectory("control-channel-stale")
         val regular = runtime.resolve("regular")
