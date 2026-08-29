@@ -20,9 +20,11 @@ class ConsumingProjectIntegrationTest {
                     val base = extension.javaClass.getMethod("getNetworkBase").invoke(extension) as org.gradle.api.file.DirectoryProperty
                     val backend = extension.javaClass.getMethod("getNetworkBackend").invoke(extension) as org.gradle.api.provider.Property<*>
                     val proxyPort = extension.javaClass.getMethod("getNetworkProxyPort").invoke(extension) as org.gradle.api.provider.Property<*>
+                    val lobbyPort = extension.javaClass.getMethod("getNetworkLobbyPort").invoke(extension) as org.gradle.api.provider.Property<*>
                     println("networkBase=" + project.projectDir.toPath().relativize(base.get().asFile.toPath()))
                     println("networkBackend=" + backend.get())
                     println("networkProxyPort=" + proxyPort.get())
+                    println("networkLobbyPort=" + lobbyPort.get())
                 }
             }
             """.trimIndent(),
@@ -31,10 +33,18 @@ class ConsumingProjectIntegrationTest {
         assertContains(defaults.output, "networkBase=run/network")
         assertContains(defaults.output, "networkBackend=consumer")
         assertContains(defaults.output, "networkProxyPort=25565")
+        assertContains(defaults.output, "networkLobbyPort=30066")
 
-        val configured = run(consumer, "printNetworkSettings", "-PnetworkBase=custom/network", "-PnetworkProxyPort=25580")
+        val configured = run(
+            consumer,
+            "printNetworkSettings",
+            "-PnetworkBase=custom/network",
+            "-PnetworkProxyPort=25580",
+            "-PnetworkLobbyPort=30100",
+        )
         assertContains(configured.output, "custom/network")
         assertContains(configured.output, "25580")
+        assertContains(configured.output, "30100")
     }
 
     @Test

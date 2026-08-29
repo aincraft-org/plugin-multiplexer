@@ -72,6 +72,54 @@ class RegistrationOwnershipTest {
     }
 
     @Test
+    fun externalRegistrationRejectsActiveCustomProxyPortBeforeMutation() {
+        val base = Files.createTempDirectory("runtime-registration-custom-port")
+        val layout = RuntimeLayout(base)
+        val serverDir = base.resolve("external")
+        val proxyPort = freePort()
+        val lobbyPort = freePort()
+        writePaperConfig(serverDir, proxyPort)
+        val paperMarker = serverDir.resolve("sentinel.txt").also { Files.writeString(it, "untouched") }
+        io.github.developmentnetwork.runtime.config.VelocityConfigWriter().write(
+            layout,
+            io.github.developmentnetwork.runtime.config.VelocityConfig(
+                proxyPort = proxyPort,
+                targetServer = "localhost",
+                onlineMode = false,
+                lobbyPort = lobbyPort,
+            ),
+        )
+        val previousVelocity = Files.readAllBytes(layout.velocityConfig)
+        val token = ControlServer.generateToken()
+        val control = ControlServer().serve(layout.proxyControl, token) {
+            io.github.developmentnetwork.runtime.controller.ControlResponse.success("reloaded")
+        }
+        AtomicFiles.write(layout.proxyReady, "ready\n")
+        try {
+            ServerSocket(proxyPort).use {
+                val request = io.github.developmentnetwork.runtime.service.RegisterExternalRequest(
+                    name = "external",
+                    port = proxyPort,
+                    owner = "external-owner",
+                    serverDir = serverDir,
+                    readinessTimeout = Duration.ofSeconds(1),
+                )
+
+                assertEquals(1, RegistrationService(layout).execute(request))
+            }
+        } finally {
+            control.close()
+        }
+
+        val registration = io.github.developmentnetwork.runtime.registry.RegistryStore(layout)
+            .readRegistration("external")
+        assertEquals(null, registration)
+        assertFalse(Files.exists(layout.backend("external").owner))
+        assertTrue(previousVelocity.contentEquals(Files.readAllBytes(layout.velocityConfig)))
+        assertEquals("untouched", Files.readString(paperMarker))
+    }
+
+    @Test
     fun reloadIsIdempotentAndStopFallbackDoesNotTouchExternalRegistration() {
         val base = Files.createTempDirectory("runtime-services")
         val layout = RuntimeLayout(base)

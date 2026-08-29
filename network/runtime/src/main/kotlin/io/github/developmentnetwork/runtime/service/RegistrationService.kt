@@ -60,20 +60,27 @@ class RegistrationService(
             if (previous != null && (previous.owner != request.owner || previous.mode != OwnershipMode.EXTERNAL)) {
                 error("Backend $name is already owned by ${previous.owner}")
             }
-            val candidate = BackendRegistration(name, request.port, request.owner, OwnershipMode.EXTERNAL, null)
+            var candidate: BackendRegistration? = null
             var generatedConfig: ByteArray? = null
             try {
                 registry.withRegistrationTransition {
-                    register(candidate)
-                    Files.createDirectories(layout.runtimeDir)
                     val config = effectiveVelocityConfig(request.targetServer, request.lobbyPort)
+                    require(request.port != config.proxyPort && request.port != config.lobbyPort) {
+                        "External backend port ${request.port} collides with the active proxy/lobby port"
+                    }
+                    val registration = BackendRegistration(name, request.port, request.owner, OwnershipMode.EXTERNAL, null)
+                    candidate = registration
+                    register(registration)
+                    Files.createDirectories(layout.runtimeDir)
                     velocityWriter.write(layout, config.copy(backendPorts = readRegistrations().associate { it.name.value to it.port }))
                     generatedConfig = capture(layout.velocityConfig)
                 }
                 requestReload(request.controlTimeout)
                 0
             } catch (error: Exception) {
-                rollback(name, request.owner, candidate, previous, previousReady, previousConfig, previousSecret, generatedConfig)
+                candidate?.let {
+                    rollback(name, request.owner, it, previous, previousReady, previousConfig, previousSecret, generatedConfig)
+                }
                 throw error
             }
         } catch (error: Exception) {
