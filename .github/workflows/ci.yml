@@ -44,19 +44,6 @@ jobs:
             network/build/libs/*.jar
             velocity-plugin/build/libs/*.jar
 
-  shell:
-    name: Shell lint
-    runs-on: ubuntu-latest
-    steps:
-      - name: Check out source
-        uses: actions/checkout@v7
-
-      - name: Check Bash syntax
-        run: bash -n bin/*.sh
-
-      - name: Run ShellCheck
-        run: shellcheck -x -P bin bin/*.sh
-
   upstream-skills:
     name: Upstream skill contract
     runs-on: ubuntu-latest

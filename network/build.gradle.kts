@@ -82,5 +82,6 @@ tasks.named("assemble") {
 }
 
 tasks.test {
+    workingDir(project.projectDir)
     useJUnitPlatform()
 }
