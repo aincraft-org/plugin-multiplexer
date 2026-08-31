@@ -165,7 +165,7 @@ class ProcessSupervisorTest {
                 ProcessSupervisor.TerminationResult.GRACEFUL,
                 supervisor.terminate(owned, Duration.ofSeconds(2)),
             )
-            assertFalse(owned.process.isAlive)
+            awaitDead(owned.handle)
         } finally {
             terminateQuietly(supervisor, owned)
         }
@@ -260,7 +260,7 @@ class ProcessSupervisorTest {
             assertTrue(child.isAlive)
             val result = supervisor.terminate(owned, Duration.ofSeconds(2))
             assertEquals(ProcessSupervisor.TerminationResult.GRACEFUL, result)
-            assertFalse(owned.process.isAlive)
+            awaitDead(owned.handle)
             awaitDead(child)
         } finally {
             terminateQuietly(supervisor, owned)
@@ -312,8 +312,8 @@ class ProcessSupervisorTest {
                 ProcessSupervisor.TerminationResult.NOT_TERMINATED,
                 supervisor.terminate(owned, Duration.ZERO),
             )
-            assertFalse(owned.process.isAlive)
-            assertFalse(child.isAlive)
+            awaitDead(owned.handle)
+            awaitDead(child)
         } finally {
             child?.destroyForcibly()
             child?.let { runCatching { it.onExit().get() } }
@@ -343,8 +343,8 @@ class ProcessSupervisorTest {
                 ProcessSupervisor.TerminationResult.NOT_TERMINATED,
                 supervisor.terminate(owned, Duration.ZERO),
             )
-            assertFalse(owned.process.isAlive)
-            assertFalse(child.isAlive)
+            awaitDead(owned.handle)
+            awaitDead(child)
         } finally {
             child?.destroyForcibly()
             child?.let { runCatching { it.onExit().get() } }
@@ -415,7 +415,7 @@ class ProcessSupervisorTest {
                 ProcessSupervisor.TerminationResult.NOT_TERMINATED,
                 supervisor.terminate(owned, Duration.ofMillis(150)),
             )
-            assertFalse(owned.process.isAlive)
+            awaitDead(owned.handle)
             assertTrue(child.isAlive)
         } finally {
             child?.destroyForcibly()
