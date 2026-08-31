@@ -442,7 +442,7 @@ class ProcessSupervisorTest {
                 ProcessSupervisor.TerminationResult.NOT_TERMINATED,
                 supervisor.terminate(owned, Duration.ofMillis(150)),
             )
-            assertFalse(owned.process.isAlive)
+            awaitDead(owned.handle)
             assertTrue(child.isAlive)
         } finally {
             child?.destroyForcibly()
