@@ -172,6 +172,79 @@ class ProcessSupervisorTest {
     }
 
     @Test
+    fun transientRootIdentityObservationRetriesBeforeFailingClosed() {
+        val work = Files.createTempDirectory("process-supervisor-transient-root")
+        val marker = work.resolve("marker")
+        val reader = TransientRootIdentityReader()
+        var lookupCalls = 0
+        val supervisor = ProcessSupervisor(reader) { pid ->
+            lookupCalls++
+            ProcessHandle.of(pid)
+        }
+        val owned = supervisor.launch(fixtureCommand(marker), work)
+        try {
+            awaitMarker(marker)
+            assertTrue(supervisor.terminate(owned, Duration.ofSeconds(2)).success)
+            assertEquals(1, lookupCalls, "retry must reuse the original process handle lookup")
+            awaitDead(owned.handle)
+        } finally {
+            terminateQuietly(supervisor, owned)
+        }
+    }
+
+    @Test
+    fun interruptedRootIdentityRetryIsNotReportedAsUnowned() {
+        val work = Files.createTempDirectory("process-supervisor-interrupted-root")
+        val marker = work.resolve("marker")
+        val supervisor = ProcessSupervisor(TransientRootIdentityReader())
+        val owned = supervisor.launch(fixtureCommand(marker), work)
+        awaitMarker(marker)
+        var result: ProcessSupervisor.TerminationResult? = null
+        var interruptRestored = false
+        val stopping = thread(start = true) {
+            Thread.currentThread().interrupt()
+            result = supervisor.terminate(owned, Duration.ofSeconds(2))
+            interruptRestored = Thread.currentThread().isInterrupted
+        }
+        try {
+            stopping.join(2_000)
+            assertFalse(stopping.isAlive)
+            assertEquals(ProcessSupervisor.TerminationResult.INTERRUPTED, result)
+            assertTrue(interruptRestored)
+            assertTrue(owned.process.isAlive)
+        } finally {
+            terminateQuietly(supervisor, owned)
+        }
+    }
+
+    @Test
+    fun interruptedProcessLookupIsNotReportedAsUnowned() {
+        val work = Files.createTempDirectory("process-supervisor-interrupted-lookup")
+        val marker = work.resolve("marker")
+        val supervisor = ProcessSupervisor(PermissiveIdentityReader()) {
+            throw InterruptedException("synthetic process lookup interruption")
+        }
+        val owned = supervisor.launch(fixtureCommand(marker), work)
+        awaitMarker(marker)
+        var result: ProcessSupervisor.TerminationResult? = null
+        var interruptRestored = false
+        val stopping = thread(start = true) {
+            result = supervisor.terminate(owned, Duration.ofSeconds(2))
+            interruptRestored = Thread.currentThread().isInterrupted
+        }
+        try {
+            stopping.join(2_000)
+            assertFalse(stopping.isAlive)
+            assertEquals(ProcessSupervisor.TerminationResult.INTERRUPTED, result)
+            assertTrue(interruptRestored)
+            assertTrue(owned.process.isAlive)
+        } finally {
+            owned.process.destroyForcibly()
+            runCatching { owned.process.waitFor() }
+        }
+    }
+
+    @Test
     fun gracefulTerminationStopsOwnedDescendantsAndObservesChildDeath() {
         val work = Files.createTempDirectory("process-supervisor-descendants")
         val marker = work.resolve("marker")
@@ -501,14 +574,32 @@ private class FailingCaptureReader : io.github.developmentnetwork.runtime.proces
     }
 }
 
+private class TransientRootIdentityReader : io.github.developmentnetwork.runtime.process.ProcessIdentityReader() {
+    private var rootPid: Long? = null
+    private var firstRootCheck = true
+
+    override fun capture(process: Process, cwd: Path): ProcessIdentity =
+        super.capture(process, cwd).also { rootPid = it.pid }
+
+    override fun matches(identity: ProcessIdentity): Boolean = true
+
+    override fun matches(handle: ProcessHandle, identity: ProcessIdentity): Boolean {
+        if (identity.pid == rootPid && firstRootCheck) {
+            firstRootCheck = false
+            return false
+        }
+        return true
+    }
+}
+
 private class RootLeaseRaceIdentityReader : io.github.developmentnetwork.runtime.process.ProcessIdentityReader() {
     private var rootPid: Long? = null
     private var rootChecks = 0
 
-    override fun matches(identity: ProcessIdentity): Boolean {
-        rootPid = identity.pid
-        return true
-    }
+    override fun capture(process: Process, cwd: Path): ProcessIdentity =
+        super.capture(process, cwd).also { rootPid = it.pid }
+
+    override fun matches(identity: ProcessIdentity): Boolean = true
 
     override fun matches(handle: ProcessHandle, identity: ProcessIdentity): Boolean {
         if (identity.pid == rootPid) {
