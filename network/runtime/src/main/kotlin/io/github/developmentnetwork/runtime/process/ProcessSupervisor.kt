@@ -84,11 +84,37 @@ class ProcessSupervisor(
     }
 
     /**
+     * Verify an existing process lease with bounded retries for transient metadata reads.
+     *
+     * @throws InterruptedException when interrupted between retry attempts.
+     */
+    @Throws(InterruptedException::class)
+    fun matches(identity: ProcessIdentity): Boolean {
+        val handle = try {
+            processHandleLookup(identity.pid).orElse(null)
+        } catch (error: InterruptedException) {
+            Thread.currentThread().interrupt()
+            throw error
+        } catch (_: Exception) {
+            null
+        } ?: return false
+        return rootOwned(handle, identity)
+    }
+
+    /**
      * Gracefully terminate the owned process tree, then force matching identities only
      * after [timeout] expires. Descendants are refreshed throughout both phases, so a
      * child spawned after the first snapshot is still owned and supervised.
      */
-    fun terminate(process: OwnedProcess, timeout: Duration): TerminationResult {
+    fun terminate(process: OwnedProcess, timeout: Duration): TerminationResult =
+        try {
+            terminateOwned(process, timeout)
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+            TerminationResult.INTERRUPTED
+        }
+
+    private fun terminateOwned(process: OwnedProcess, timeout: Duration): TerminationResult {
         require(!timeout.isNegative) { "Termination timeout must not be negative" }
         if (!process.process.isAlive) {
             // A dead root cannot be used to perform a final descendant
@@ -96,7 +122,7 @@ class ProcessSupervisor(
             // no successful termination claim is safe.
             return TerminationResult.NOT_OWNED
         }
-        if (!safeMatches(process.identity)) return TerminationResult.NOT_OWNED
+        if (!matches(process.identity)) return TerminationResult.NOT_OWNED
         if (wasInterrupted()) return TerminationResult.INTERRUPTED
 
         val root = process.process.toHandle()
@@ -458,11 +484,25 @@ class ProcessSupervisor(
     }
 
 
-    private fun rootOwned(root: ProcessHandle, identity: ProcessIdentity): Boolean =
-        safeAlive(root) && safeMatches(root, identity)
+    private fun rootOwned(root: ProcessHandle, identity: ProcessIdentity): Boolean {
+        repeat(3) { attempt ->
+            if (!safeAlive(root)) return false
+            // Process metadata can be momentarily unavailable while the process
+            // remains alive. Re-read the same handle before failing closed; a
+            // replacement cannot match its original start identity.
+            if (safeMatches(root, identity)) return true
+            if (attempt < 2) {
+                try {
+                    Thread.sleep(10)
+                } catch (error: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    throw error
+                }
+            }
+        }
+        return false
+    }
 
-    private fun safeMatches(identity: ProcessIdentity): Boolean =
-        runCatching { identityReader.matches(identity) }.getOrDefault(false)
 
     private fun safeMatches(handle: ProcessHandle, identity: ProcessIdentity): Boolean =
         runCatching { identityReader.matches(handle, identity) }.getOrDefault(false)

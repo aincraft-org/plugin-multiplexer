@@ -403,13 +403,13 @@ class InfrastructureController(
                 if (stopRequested.get()) return
                 throw IllegalStateException("proxy process exited unexpectedly")
             }
-            if (!processSupervisor.identityReader.matches(proxy.identity)) {
+            if (!processSupervisor.matches(proxy.identity)) {
                 throw IllegalStateException("proxy process identity no longer matches its owner lease")
             }
 
             val lobby = lobbyProcess ?: error("Lobby process handle was lost")
             if (lobby.process.isAlive) {
-                if (!processSupervisor.identityReader.matches(lobby.identity)) {
+                if (!processSupervisor.matches(lobby.identity)) {
                     throw IllegalStateException("lobby process identity no longer matches its owner lease")
                 }
                 awaitWake(50)
@@ -612,7 +612,7 @@ class InfrastructureController(
 
     private fun requireLive(process: OwnedProcess, component: String) {
         if (!process.process.isAlive) throw IllegalStateException("$component process exited before readiness")
-        check(processSupervisor.identityReader.matches(process.identity)) {
+        check(processSupervisor.matches(process.identity)) {
             "$component process identity no longer matches its owner lease"
         }
     }
@@ -621,7 +621,7 @@ class InfrastructureController(
         runCatching { ServerSocket(port).use { false } }.getOrDefault(true)
 
     private fun identityIsLive(identity: ProcessIdentity): Boolean =
-        processSupervisor.identityReader.matches(identity)
+        processSupervisor.matches(identity)
 
     private fun awaitWake(millis: Long): Boolean {
         if (stopRequested.get()) return false
@@ -989,7 +989,7 @@ class ManagedBackendController(
 
     private fun requireLive(process: OwnedProcess) {
         check(process.process.isAlive) { "backend process exited before readiness" }
-        check(processSupervisor.identityReader.matches(process.identity)) {
+        check(processSupervisor.matches(process.identity)) {
             "backend process identity no longer matches its owner lease"
         }
     }
