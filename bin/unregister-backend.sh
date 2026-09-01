@@ -115,10 +115,12 @@ sed -i "/^$NAME\$/d" "$REGISTRY_FILE"
 REGISTRY="$(printf '%s ' "$(cat "$REGISTRY_FILE")")"
 
 if [ -z "${PROXY_PORT:-}" ]; then
-  PROXY_PORT="$(sed -n 's/^bind = "0.0.0.0:\([0-9][0-9]*\)".*/\1/p' "$BASE/runtime/velocity.toml" | sed -n '1p')"
+  PROXY_BIND="$(sed -n 's/^bind = "\([^"]*\):\([0-9][0-9]*\)".*/\1/p' "$BASE/runtime/velocity.toml" | sed -n '1p')"
+  PROXY_PORT="$(sed -n 's/^bind = "\([^"]*\):\([0-9][0-9]*\)".*/\2/p' "$BASE/runtime/velocity.toml" | sed -n '1p')"
+  export PROXY_BIND="${PROXY_BIND:-127.0.0.1}"
   PROXY_PORT="${PROXY_PORT:-25565}"
 fi
-( export BASE BACKENDS="$REGISTRY" PROXY_PORT="$PROXY_PORT"
+( export BASE BACKENDS="$REGISTRY" PROXY_PORT="$PROXY_PORT" PROXY_BIND
   # shellcheck source=velocity-toml.sh
   # shellcheck disable=SC2031
   . "$BIN_DIR/velocity-toml.sh"

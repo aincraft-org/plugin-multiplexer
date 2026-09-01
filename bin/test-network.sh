@@ -36,7 +36,9 @@ fi
 
 PROXY_PORT="${PROXY_PORT:-}"
 if [ -z "$PROXY_PORT" ] && [ -f "$RUNTIME/velocity.toml" ]; then
-  PROXY_PORT="$(sed -n 's/^bind = "0.0.0.0:\([0-9][0-9]*\)".*/\1/p' "$RUNTIME/velocity.toml" | sed -n '1p')"
+  PROXY_BIND="$(sed -n 's/^bind = "\([^"]*\):\([0-9][0-9]*\)".*/\1/p' "$RUNTIME/velocity.toml" | sed -n '1p')"
+  PROXY_PORT="$(sed -n 's/^bind = "\([^"]*\):\([0-9][0-9]*\)".*/\2/p' "$RUNTIME/velocity.toml" | sed -n '1p')"
+  export PROXY_BIND="${PROXY_BIND:-127.0.0.1}"
 fi
 PROXY_PORT="${PROXY_PORT:-25565}"
 [[ "$PROXY_PORT" =~ ^[0-9]+$ ]] && [ "$PROXY_PORT" -ge 1024 ] && [ "$PROXY_PORT" -le 65535 ] \

@@ -8,16 +8,66 @@
 # Env inputs:
 #   BASE          runtime dir (default $PWD/development-network)
 #   PROXY_PORT    proxy bind port (default 25565)
+#   PROXY_BIND    bind address (default 127.0.0.1). Non-loopback requires
+#                 ALLOW_NON_LOOPBACK_BIND=true (or PROXY_BIND_ALL=true → 0.0.0.0).
+#   FORWARDING_SECRET  optional explicit modern-forwarding secret; otherwise
+#                 reuse runtime/forwarding.secret when present, else generate.
 #   TARGET_SERVER host the proxy dials backends on (default localhost)
 #   BACKENDS      optional override; else runtime/backends.txt; else "dev"
 #   PORT_<NAME>   optional per-backend port override
 #
 # Writes: $BASE/runtime/velocity.toml and $BASE/runtime/forwarding.secret.
 
+# Resolve (and persist) the modern-forwarding secret for this BASE.
+resolve_forwarding_secret() {
+  local forwarding_file="$1"
+  local existing
+  if [ -n "${FORWARDING_SECRET+x}" ] && [ -n "$FORWARDING_SECRET" ]; then
+    printf '%s' "$FORWARDING_SECRET"
+    return 0
+  fi
+  if [ -f "$forwarding_file" ]; then
+    existing="$(tr -d '\r\n' < "$forwarding_file" || true)"
+    if [ -n "$existing" ]; then
+      printf '%s' "$existing"
+      return 0
+    fi
+  fi
+  if command -v openssl >/dev/null 2>&1; then
+    openssl rand -hex 32
+    return 0
+  fi
+  head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n'
+}
+
+# True when the address is loopback-only.
+is_loopback_bind() {
+  case "$1" in
+    127.0.0.1|::1|localhost) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 write_velocity_toml() {
   local BASE="${BASE:-$PWD/development-network}"
   local PROXY_PORT="${PROXY_PORT:-25565}"
   local TARGET_SERVER="${TARGET_SERVER:-localhost}"
+  local PROXY_BIND
+  if [ "${PROXY_BIND_ALL:-false}" = "true" ]; then
+    PROXY_BIND="0.0.0.0"
+  else
+    PROXY_BIND="${PROXY_BIND:-127.0.0.1}"
+  fi
+  if ! is_loopback_bind "$PROXY_BIND"; then
+    if [ "${ALLOW_NON_LOOPBACK_BIND:-false}" != "true" ] && [ "${PROXY_BIND_ALL:-false}" != "true" ]; then
+      echo "PROXY_BIND=$PROXY_BIND is not loopback." >&2
+      echo "Dev network defaults to 127.0.0.1. Set ALLOW_NON_LOOPBACK_BIND=true" >&2
+      echo "(or PROXY_BIND_ALL=true for 0.0.0.0) to opt in — offline mode + shared" >&2
+      echo "forwarding secret must not be exposed on a shared network." >&2
+      return 1
+    fi
+  fi
+
   local online_mode
   if [ -n "${PROXY_ONLINE_MODE+x}" ]; then
     online_mode="$PROXY_ONLINE_MODE"
@@ -70,16 +120,23 @@ write_velocity_toml() {
     echo 30067
   }
 
-  # Modern forwarding needs: offline mode + a shared secret, mirrored in
-  # paper-global.yml on each backend. Dev secret, not a credential.
-  local SECRET="dev-local-forwarding-secret-change-me"
+  # Modern forwarding needs offline mode + a shared secret, mirrored in
+  # paper-global.yml on each backend. Persist per BASE; never a fixed string.
   local FORWARDING_FILE="$BASE/runtime/forwarding.secret"
+  mkdir -p "$BASE/runtime"
+  local SECRET
+  SECRET="$(resolve_forwarding_secret "$FORWARDING_FILE")"
+  if [ -z "$SECRET" ]; then
+    echo "failed to resolve a non-empty forwarding secret" >&2
+    return 1
+  fi
   printf '%s\n' "$SECRET" > "$FORWARDING_FILE"
+  chmod 600 "$FORWARDING_FILE" 2>/dev/null || true
 
   {
     cat <<EOF
 config-version = "2.8"
-bind = "0.0.0.0:$PROXY_PORT"
+bind = "$PROXY_BIND:$PROXY_PORT"
 motd = "<#09add3>dev-network"
 show-max-players = 20
 online-mode = $online_mode

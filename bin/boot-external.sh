@@ -16,7 +16,7 @@
 #   - currently listening on $PORT_<NAME> (default 30067 + registry index)
 #   - config/paper-global.yml: proxies.velocity.enabled=true,
 #     proxies.velocity.online-mode=false,
-#     proxies.velocity.secret="dev-local-forwarding-secret-change-me"
+#     proxies.velocity.secret=<contents of $BASE/runtime/forwarding.secret>
 #   - server.properties: online-mode=false
 #
 # Usage: boot-external.sh <NAME>
@@ -87,13 +87,25 @@ printf '%s\n' "$SERVER_PORT" > "$BASE/runtime/$NAME.port"
 echo "== boot-external: registered '$NAME' @127.0.0.1:$SERVER_PORT"
 
 # --- verify modern-forwarding config (NEVER write to the server dir) --------
+FORWARDING_FILE="$BASE/runtime/forwarding.secret"
+if [ ! -f "$FORWARDING_FILE" ]; then
+  echo "!! boot-external: missing $FORWARDING_FILE — boot the proxy for this BASE first." >&2
+  exit 1
+fi
+FORWARDING_SECRET="$(tr -d '\r\n' < "$FORWARDING_FILE")"
+if [ -z "$FORWARDING_SECRET" ]; then
+  echo "!! boot-external: $FORWARDING_FILE is empty" >&2
+  exit 1
+fi
+
 CFG="$WORKDIR/config/paper-global.yml"
 MISSING=""
 if [ -f "$CFG" ]; then
   grep -q 'velocity:' "$CFG"                       || MISSING="$MISSING velocity-block"
   grep -q 'enabled: true' "$CFG"                    || MISSING="$MISSING enabled:true"
   grep -q 'online-mode: false' "$CFG"               || MISSING="$MISSING online-mode:false"
-  grep -q 'secret: dev-local-forwarding-secret-change-me' "$CFG" || MISSING="$MISSING secret"
+  grep -Fq "secret: $FORWARDING_SECRET" "$CFG" || \
+    grep -Fq "secret: \"$FORWARDING_SECRET\"" "$CFG" || MISSING="$MISSING secret"
 else
   MISSING="paper-global.yml (file absent)"
 fi
@@ -101,13 +113,14 @@ fi
 if [ -n "$MISSING" ]; then
   echo "!! boot-external: $NAME is NOT configured for Velocity modern forwarding ($MISSING)."
   echo "!! The harness never edits external server files. Add this block to $CFG"
-  echo "!! (Paper merges it on restart; keep the rest of the file as-is):"
+  echo "!! (Paper merges it on restart; keep the rest of the file as-is)."
+  echo "!! Use the secret from $FORWARDING_FILE for THIS BASE (do not invent one):"
   echo "!!"
   echo "!!   proxies:"
   echo "!!     velocity:"
   echo "!!       enabled: true"
   echo "!!       online-mode: false"
-  echo "!!       secret: \"dev-local-forwarding-secret-change-me\""
+  echo "!!       secret: \"$FORWARDING_SECRET\""
   echo "!!"
   echo "!! Then RESTART the external server once. (server.properties must also"
   echo "!! have online-mode=false.)"

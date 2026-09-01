@@ -27,12 +27,14 @@ exec 8>"$BASE/runtime/register.lock"
 flock 8
 
 if [ -z "${PROXY_PORT:-}" ]; then
-  PROXY_PORT="$(sed -n 's/^bind = "0.0.0.0:\([0-9][0-9]*\)".*/\1/p' "$BASE/runtime/velocity.toml" | head -1)"
+  PROXY_BIND="$(sed -n 's/^bind = "\([^"]*\):\([0-9][0-9]*\)".*/\1/p' "$BASE/runtime/velocity.toml" | head -1)"
+  PROXY_PORT="$(sed -n 's/^bind = "\([^"]*\):\([0-9][0-9]*\)".*/\2/p' "$BASE/runtime/velocity.toml" | head -1)"
+  export PROXY_BIND="${PROXY_BIND:-127.0.0.1}"
   PROXY_PORT="${PROXY_PORT:-25565}"
 fi
 
 (
-  export BASE PROXY_PORT
+  export BASE PROXY_PORT PROXY_BIND
   # shellcheck source=velocity-toml.sh
   . "$BIN_DIR/velocity-toml.sh"
   write_velocity_toml

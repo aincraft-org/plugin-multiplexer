@@ -422,10 +422,10 @@ proxies:
   velocity:
     enabled: true
     online-mode: false
-    secret: "dev-local-forwarding-secret-change-me"
+    secret: "<paste contents of runtime/forwarding.secret for THIS BASE>"
 ```
 
-plus `online-mode=false` in `server.properties`, then **restart the external server once**. After that, join it:
+Copy the secret from `$BASE/runtime/forwarding.secret` after the proxy has booted (it is generated per BASE; do not invent a fixed string). Plus `online-mode=false` in `server.properties`, then **restart the external server once**. After that, join it:
 
 ```bash
 EXTERNAL_DIR_NAMEPLUG=/path/to/plugin-project/run \
@@ -459,7 +459,8 @@ backend:30068 (30068)  reachable  motd='dev-network vanilla' version=Paper 26.2
 
 - **Velocity modern forwarding**: `player-info-forwarding-mode = "modern"` in `velocity.toml`, with proxy `online-mode=false` by default. Set `PROXY_ONLINE_MODE=true` (or Gradle `-PnetworkOnlineMode=true`) to require Mojang/Microsoft authentication at the proxy; backends remain `online-mode=false` with the shared secret in `runtime/forwarding.secret` mirrored into each backend's `config/paper-global.yml` → `proxies.velocity.secret`. Offline mode keeps dev accounts (and a Rust Azalea bot from `autonomous-testing`) connectable without Mojang auth.
 - **Every backend** sets `server.properties` `online-mode=false` and `spigot.yml` `settings.bungeecord: false` (modern forwarding REQUIRES BungeeCord forwarding off).
-- `forwarding.secret` is generated per boot with a fixed dev secret string — a dev secret, never a production credential.
+- **Proxy bind defaults to `127.0.0.1`**. Set `PROXY_BIND=0.0.0.0` with `ALLOW_NON_LOOPBACK_BIND=true`, or `PROXY_BIND_ALL=true`, only when you intentionally expose the offline-mode proxy on a shared interface.
+- `forwarding.secret` is generated per BASE (random hex, or `FORWARDING_SECRET` override) and reused across hot-reloads; never a fixed checked-in string. Mode `0600` when the filesystem allows.
 - The `try` list for login/kick failover is `["lobby", <backends…>]` — lobby first.
 - Configs are generated on every boot; worlds persist in the backend's runtime dir.
 - Jar downloads are atomic and race-safe: temp file in the same dir, SHA-256 verify, `mv` into place, per-jar `flock` — a fresh multi-backend boot cannot corrupt a jar that another booter is still writing.
@@ -497,3 +498,5 @@ Stops proxy, lobby, and every registered backend by pidfile (Java PID, so Paper'
 | Expecting a URL+SHA256 change to replace an installed world | Delete `runtime/lobby/world` first (and the old `.world.zip` cache) | The map install is immutable: an existing `world/level.dat` always wins, never overwritten |
 | A stale `.port` file from a previous run pinning a dead port | Remove `runtime/<name>.port` before re-registering that name | The generator trusts the persisted port, so a stale file points the proxy at a dead listener |
 | Two agents registering the same name concurrently | Names must be unique per `backends.txt`; the flock serializes the registry but a duplicate name is a write race | `[servers]` ends up with one entry for two different ports |
+| Binding the proxy to `0.0.0.0` by default on a shared host | Leave the default `127.0.0.1`; opt in with `ALLOW_NON_LOOPBACK_BIND=true` / `PROXY_BIND_ALL=true` only when needed | Offline mode + a known forwarding secret on a LAN/WAN bind enables impersonation |
+| Hardcoding `dev-local-forwarding-secret-change-me` on an external Paper server | Copy the live secret from `$BASE/runtime/forwarding.secret` | Each BASE generates its own secret; a fixed string will fail verification |

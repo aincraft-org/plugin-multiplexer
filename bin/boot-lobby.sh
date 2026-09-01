@@ -95,13 +95,25 @@ level-name=world
 motd=dev-network lobby
 EOF
 
+FORWARDING_FILE="$BASE/runtime/forwarding.secret"
+if [ ! -f "$FORWARDING_FILE" ]; then
+  echo "!! lobby: missing $FORWARDING_FILE — boot the proxy first so the" >&2
+  echo "!! shared modern-forwarding secret exists for this BASE." >&2
+  exit 1
+fi
+FORWARDING_SECRET="$(tr -d '\r\n' < "$FORWARDING_FILE")"
+if [ -z "$FORWARDING_SECRET" ]; then
+  echo "!! lobby: $FORWARDING_FILE is empty" >&2
+  exit 1
+fi
+
 mkdir -p "$WORKDIR/config"
 cat > "$WORKDIR/config/paper-global.yml" <<EOF
 proxies:
   velocity:
     enabled: true
     online-mode: false
-    secret: "dev-local-forwarding-secret-change-me"
+    secret: "$FORWARDING_SECRET"
 EOF
 
 cat > "$WORKDIR/eula.txt" <<EOF

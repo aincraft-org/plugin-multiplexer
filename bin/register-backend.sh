@@ -247,11 +247,13 @@ REGISTRY="$(printf '%s ' "$(cat "$REGISTRY_FILE")")"
 if [ -n "${PROXY_PORT:-}" ]; then
   GENERATOR_PROXY_PORT="$PROXY_PORT"
 else
-  GENERATOR_PROXY_PORT="$(sed -n 's/^bind = "0.0.0.0:\([0-9][0-9]*\)".*/\1/p' "$BASE/runtime/velocity.toml" | sed -n '1p')"
+  GENERATOR_PROXY_BIND="$(sed -n 's/^bind = "\([^"]*\):\([0-9][0-9]*\)".*/\1/p' "$BASE/runtime/velocity.toml" | sed -n '1p')"
+  GENERATOR_PROXY_PORT="$(sed -n 's/^bind = "\([^"]*\):\([0-9][0-9]*\)".*/\2/p' "$BASE/runtime/velocity.toml" | sed -n '1p')"
   GENERATOR_PROXY_PORT="${GENERATOR_PROXY_PORT:-25565}"
 fi
 (
   export BASE BACKENDS="$REGISTRY" PROXY_PORT="$GENERATOR_PROXY_PORT"
+  export PROXY_BIND="${PROXY_BIND:-${GENERATOR_PROXY_BIND:-127.0.0.1}}"
   # shellcheck source=velocity-toml.sh
   . "$BIN_DIR/velocity-toml.sh"
   write_velocity_toml
